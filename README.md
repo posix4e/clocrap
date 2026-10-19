@@ -35,7 +35,7 @@ cargo install --locked --path .
 From GitHub, once the repository is public:
 
 ```bash
-cargo install --locked --git https://github.com/winnowwallet/clocrap
+cargo install --locked --git https://github.com/posix4e/clocrap
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. `cargo install` uses it.
