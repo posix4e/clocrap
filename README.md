@@ -2,8 +2,9 @@
 
 One static binary that counts source lines by language, like `cloc`, and scores
 every function by its CRAP value, so a repository's worst code is listed first.
-It walks a tree in parallel, respects `.gitignore`, and can count only the lines
-a change added.
+It counts the files git would commit (tracked files plus untracked files that
+`.gitignore` does not exclude), reads them in parallel, and can count only the
+lines a change added.
 
 ```text
 $ cargo llvm-cov --locked -p rescue-core --lcov --output-path lcov.info
@@ -46,6 +47,7 @@ The toolchain is pinned in `rust-toolchain.toml`. `cargo install` uses it.
 clocrap                      # the current directory, as a table
 clocrap src tests            # several roots
 clocrap --by-file            # a row per file as well
+clocrap --walk               # every file under the paths, tracked or not
 clocrap --json               # machine-readable, for scripts
 clocrap --diff origin/main   # only the lines added or changed against a ref
 ```
@@ -74,9 +76,25 @@ they are string literals.
 The total of lines matches `wc -l` for files that end in a newline. A final
 line without a newline counts as one more line than `wc -l` reports.
 
-Hidden files and directories are skipped, and `.gitignore` is honoured even
-outside a git repository. Files with an unknown extension, and files with a NUL
-byte in their first 8 KB, are not counted.
+### Which files
+
+By default the files are the ones git lists for each path: every tracked file,
+plus every untracked file that `.gitignore` and the other standard ignore files
+do not exclude. That is what `git add -A` would commit, so build output and
+other ignored files never count. Hidden files that git lists, such as
+`.github/workflows/ci.yml`, are counted. A tracked file deleted from the
+working tree, a symlink and a submodule are not. The count reads the working
+tree, not the index. A file named explicitly that git ignores is skipped.
+
+A path that is not inside a git repository, or a machine without git, falls
+back to `--walk`.
+
+`--walk` finds files by walking the directories instead. It skips hidden files
+and directories and honours `.gitignore` even outside a git repository, so it
+also counts tracked files that `.gitignore` excludes and misses hidden ones.
+
+Either way, files with an unknown extension, and files with a NUL byte in their
+first 8 KB, are not counted.
 
 `--diff <REF>` runs `git diff -U0 <REF>` in each repository the roots belong
 to. It counts only the added and changed lines in the working tree. A file with

@@ -10,7 +10,7 @@ use clocrap::crap::{self, DEFAULT_THRESHOLD};
 use clocrap::diff;
 use clocrap::lcov::Coverage;
 use clocrap::report;
-use clocrap::walk::{self, ScanOptions};
+use clocrap::walk::{self, Listing, ScanOptions};
 
 /// Count source lines by language, and score functions by CRAP.
 // Each flag is a switch on the command line, so the bools are the design.
@@ -26,6 +26,11 @@ struct Cli {
     /// Also print one row per file, in path order.
     #[arg(long)]
     by_file: bool,
+    /// Count every recognised file under the paths by walking the directories,
+    /// instead of the files git lists (tracked files, plus untracked files git
+    /// does not ignore). A walk skips hidden files.
+    #[arg(long)]
+    walk: bool,
     /// Count only the lines added or changed since this git ref.
     #[arg(long, value_name = "REF")]
     diff: Option<String>,
@@ -78,6 +83,11 @@ fn run(cli: &Cli) -> Result<ExitCode, String> {
     let reports = walk::scan(
         &roots,
         &ScanOptions {
+            listing: if cli.walk {
+                Listing::Walk
+            } else {
+                Listing::Vcs
+            },
             changed,
             functions: want_crap,
             threads: cli.threads,

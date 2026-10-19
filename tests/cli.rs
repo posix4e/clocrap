@@ -233,6 +233,26 @@ fn diff_against_an_unknown_ref_is_an_error() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn counts_the_files_git_lists_unless_told_to_walk() {
+    let dir = fixture("vcs-default");
+    git(&dir, &["init", "-q"]);
+    write(&dir.join(".gitignore"), "ignored.rs\n");
+    write(&dir.join("tracked.rs"), "fn t() {}\n");
+    write(&dir.join(".github/ci.yml"), "name: ci\n");
+    write(&dir.join("untracked.rs"), "fn u() {}\n");
+    write(&dir.join("ignored.rs"), "fn i() {}\n");
+    git(&dir, &["add", "tracked.rs", ".github/ci.yml"]);
+
+    // Tracked, hidden but tracked, and untracked but not ignored.
+    let by_git = stdout_json(&clocrap(&dir, &["--json"]));
+    assert_eq!(by_git["total"]["files"], 3);
+    // A walk skips the hidden directory.
+    let walked = stdout_json(&clocrap(&dir, &["--json", "--walk"]));
+    assert_eq!(walked["total"]["files"], 2);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
