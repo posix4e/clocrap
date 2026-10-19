@@ -1,0 +1,32 @@
+[package]
+name = "clocrap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+description = "Count lines by language and score functions by CRAP, in one fast binary"
+repository = "https://github.com/winnowwallet/clocrap"
+readme = "README.md"
+keywords = ["cloc", "loc", "crap", "coverage", "complexity"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "clocrap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+ignore = "0.4"
+serde_json = "1"
+tree-sitter = "0.27"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-swift = "0.7"
+tree-sitter-typescript = "0.23"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
