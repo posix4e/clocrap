@@ -163,8 +163,19 @@ has the same curve: real time stops falling at four or so readers, while system
 time keeps rising. File opens contend in macOS past that point. So the default
 is four workers, and `--threads` changes it.
 
-`scripts/bench.py [DIR]` times clocrap against `cloc` and `tokei` on one
-directory when they are installed, and reports each tool's code total.
+Against the other two tools, on the same 100,000-file tree (50,000 Rust and
+50,000 Python, 4.4 million lines, each file with different content), best of
+three runs, `--threads 4` for clocrap:
+
+| Tool     | Wall clock | Code lines |
+|----------|-----------:|-----------:|
+| clocrap  |     1.37 s |  2,500,000 |
+| tokei 15 |     1.42 s |  2,500,000 |
+| cloc 2.10 |   19.6 s  |  2,500,000 |
+
+`scripts/bench.py [DIR]` runs the comparison on any directory. cloc skips files
+whose contents are identical to an earlier file, so a benchmark tree must have
+distinct files, or cloc looks several times faster than it is.
 
 ## Limits
 
