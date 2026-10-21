@@ -118,6 +118,75 @@ fn per_language_totals_and_table() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+fn language<'a>(json: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    json["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["language"] == name)
+        .unwrap_or_else(|| panic!("no {name} row in {json}"))
+}
+
+#[test]
+fn files_without_an_extension_are_counted_by_their_shebang() {
+    let dir = fixture("shebang");
+    write(
+        &dir.join("bin/tool"),
+        "#!/usr/bin/env python3\n# a comment\nprint(1)\n",
+    );
+    write(&dir.join("bin/run"), "#!/bin/sh\necho hi\n");
+    write(&dir.join("bin/data"), "plain text\n");
+    write(&dir.join("LICENSE"), "MIT\n");
+    let json = stdout_json(&clocrap(&dir, &["--json"]));
+    assert_eq!(json["total"]["files"], 2);
+    let python = language(&json, "Python");
+    assert_eq!(
+        (
+            python["files"].as_u64(),
+            python["comment"].as_u64(),
+            python["code"].as_u64()
+        ),
+        (Some(1), Some(2), Some(1))
+    );
+    let shell = language(&json, "Shell");
+    assert_eq!(
+        (shell["comment"].as_u64(), shell["code"].as_u64()),
+        (Some(1), Some(1))
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn c_html_css_and_json_lines_are_counted() {
+    let dir = fixture("more-languages");
+    write(
+        &dir.join("probe.c"),
+        "/* block\n comment */\nint main(void) { return '/'; } // tail\n",
+    );
+    write(
+        &dir.join("page.html"),
+        "<!-- note -->\n<p>\"quoted\" text</p>\n<!--\nmulti\n-->\n",
+    );
+    write(
+        &dir.join("site.css"),
+        "/* theme */\nbody { content: \"/*\"; }\n",
+    );
+    write(&dir.join("events.jsonl"), "{\"a\":1}\n{\"b\":2}\n");
+    let json = stdout_json(&clocrap(&dir, &["--json"]));
+    let counts = |name: &str| {
+        let row = language(&json, name);
+        (
+            row["comment"].as_u64().unwrap(),
+            row["code"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(counts("C"), (2, 1));
+    assert_eq!(counts("HTML"), (4, 1));
+    assert_eq!(counts("CSS"), (1, 1));
+    assert_eq!(counts("JSON"), (0, 2));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn gitignored_files_are_not_counted() {
     let dir = fixture("ignore");

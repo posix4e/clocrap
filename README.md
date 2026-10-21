@@ -58,7 +58,7 @@ Counts are by language, detected from the file extension:
 |------------|--------------------------------------------|-------------------------------------|
 | Rust       | `rs`                                       | `//`, nested `/* */`                |
 | TOML       | `toml`                                     | `#`                                 |
-| JSON       | `json`                                     | none                                |
+| JSON       | `json`, `jsonl`, `ndjson`                  | none                                |
 | Markdown   | `md`, `markdown`                           | none, so every non-blank line is code |
 | Python     | `py`                                       | `#`                                 |
 | Swift      | `swift`                                    | `//`, nested `/* */`                |
@@ -67,11 +67,21 @@ Counts are by language, detected from the file extension:
 | Kotlin     | `kt`, `kts`                                | `//`, nested `/* */`                |
 | Shell      | `sh`, `bash`, `zsh`                        | `#`                                 |
 | YAML       | `yml`, `yaml`                              | `#`                                 |
+| C          | `c`, `h`                                   | `//`, `/* */`                       |
+| HTML       | `html`, `htm`                              | `<!-- -->`; text between tags is code |
+| CSS        | `css`                                      | `/* */`                             |
+
+A file with no extension is read, and counted if its first line is a `#!`
+naming Python (`python`, `python3`, `python3.12`), a POSIX shell (`sh`,
+`bash`, `zsh`, `dash`, `ksh`) or Node, by path or through `env`. That covers
+the extensionless scripts most repositories keep in `scripts/` or `bin/`.
 
 A line is **blank** if it holds only whitespace, **comment** if it holds only
 comment text, and **code** otherwise. A comment marker inside a string is code.
 Doc comments (`///`, `//!`) are comments. Python docstrings are code, since
-they are string literals.
+they are string literals. A whitespace-only line inside a multi-line string is
+still blank. A `#!` line is a comment, as `#` makes it in every language that
+uses one.
 
 The total of lines matches `wc -l` for files that end in a newline. A final
 line without a newline counts as one more line than `wc -l` reports.
@@ -93,7 +103,8 @@ back to `--walk`.
 and directories and honours `.gitignore` even outside a git repository, so it
 also counts tracked files that `.gitignore` excludes and misses hidden ones.
 
-Either way, files with an unknown extension, and files with a NUL byte in their
+Either way, files with an unknown extension, files with no extension whose
+first line names no supported language, and files with a NUL byte in their
 first 8 KB, are not counted.
 
 `--diff <REF>` runs `git diff -U0 <REF>` in each repository the roots belong

@@ -15,6 +15,9 @@ pub enum Language {
     Kotlin,
     Shell,
     Yaml,
+    C,
+    Html,
+    Css,
 }
 
 /// A block comment such as `/* ... */`.
@@ -101,6 +104,11 @@ const NESTED_C_BLOCK: BlockComment = BlockComment {
     close: b"*/",
     nests: true,
 };
+const HTML_BLOCK: BlockComment = BlockComment {
+    open: b"<!--",
+    close: b"-->",
+    nests: false,
+};
 
 const RUST_STRINGS: &[StringSyntax] = &[
     StringSyntax {
@@ -126,7 +134,7 @@ const RUST_STRINGS: &[StringSyntax] = &[
 
 impl Language {
     /// Every language, in the order they are documented.
-    pub const ALL: [Language; 11] = [
+    pub const ALL: [Language; 14] = [
         Language::Rust,
         Language::Toml,
         Language::Json,
@@ -138,6 +146,9 @@ impl Language {
         Language::Kotlin,
         Language::Shell,
         Language::Yaml,
+        Language::C,
+        Language::Html,
+        Language::Css,
     ];
 
     /// The name printed in reports.
@@ -155,6 +166,9 @@ impl Language {
             Language::Kotlin => "Kotlin",
             Language::Shell => "Shell",
             Language::Yaml => "YAML",
+            Language::C => "C",
+            Language::Html => "HTML",
+            Language::Css => "CSS",
         }
     }
 
@@ -165,7 +179,7 @@ impl Language {
         Some(match lower.as_str() {
             "rs" => Language::Rust,
             "toml" => Language::Toml,
-            "json" => Language::Json,
+            "json" | "jsonl" | "ndjson" => Language::Json,
             "md" | "markdown" => Language::Markdown,
             "py" => Language::Python,
             "swift" => Language::Swift,
@@ -174,6 +188,31 @@ impl Language {
             "kt" | "kts" => Language::Kotlin,
             "sh" | "bash" | "zsh" => Language::Shell,
             "yml" | "yaml" => Language::Yaml,
+            "c" | "h" => Language::C,
+            "html" | "htm" => Language::Html,
+            "css" => Language::Css,
+            _ => return None,
+        })
+    }
+
+    /// The language a `#!` first line names, for a file with no extension:
+    /// Python, the POSIX shells and Node, by path or through `env` (whose
+    /// options, such as `-S`, are skipped). Version suffixes such as
+    /// `python3.12` select the same language.
+    #[must_use]
+    pub fn from_shebang(first_line: &[u8]) -> Option<Language> {
+        let text = std::str::from_utf8(first_line.strip_prefix(b"#!")?).ok()?;
+        let mut words = text.split_whitespace();
+        let mut program = words.next()?.rsplit('/').next()?;
+        if program == "env" {
+            program = words.find(|word| !word.starts_with('-') && !word.contains('='))?;
+            program = program.rsplit('/').next()?;
+        }
+        let name = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        Some(match name {
+            "python" => Language::Python,
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => Language::Shell,
+            "node" => Language::JavaScript,
             _ => return None,
         })
     }
@@ -237,6 +276,26 @@ impl Language {
                 strings: &[DQ, SQ],
                 char_literals: false,
             },
+            Language::C => Syntax {
+                line_comments: SLASH,
+                block: Some(C_BLOCK),
+                strings: &[DQ],
+                char_literals: true,
+            },
+            // Markup has no strings the classifier must respect: text between
+            // tags is prose, so a quote in it must not open a string.
+            Language::Html => Syntax {
+                line_comments: NONE,
+                block: Some(HTML_BLOCK),
+                strings: &[],
+                char_literals: false,
+            },
+            Language::Css => Syntax {
+                line_comments: NONE,
+                block: Some(C_BLOCK),
+                strings: &[DQ, SQ_ESC],
+                char_literals: false,
+            },
         }
     }
 }
@@ -273,6 +332,36 @@ mod tests {
         assert_eq!(Language::from_extension("yaml"), Some(Language::Yaml));
         assert_eq!(Language::from_extension("exe"), None);
         assert_eq!(Language::from_extension(""), None);
+        assert_eq!(Language::from_extension("jsonl"), Some(Language::Json));
+        assert_eq!(Language::from_extension("h"), Some(Language::C));
+        assert_eq!(Language::from_extension("HTML"), Some(Language::Html));
+        assert_eq!(Language::from_extension("css"), Some(Language::Css));
+    }
+
+    #[test]
+    fn shebangs_select_languages_for_files_without_an_extension() {
+        let cases: [(&[u8], Option<Language>); 12] = [
+            (b"#!/usr/bin/env python3", Some(Language::Python)),
+            (b"#!/usr/bin/python3.12 -I", Some(Language::Python)),
+            (b"#!/usr/bin/env -S python3 -u", Some(Language::Python)),
+            (b"#!/usr/bin/env LC_ALL=C python3", Some(Language::Python)),
+            (b"#!/bin/sh", Some(Language::Shell)),
+            (b"#!/bin/bash -e", Some(Language::Shell)),
+            (b"#!/usr/bin/env zsh", Some(Language::Shell)),
+            (b"#! /bin/dash", Some(Language::Shell)),
+            (b"#!/usr/bin/env node", Some(Language::JavaScript)),
+            (b"#!/usr/bin/env ruby", None),
+            (b"# not a shebang", None),
+            (b"#!", None),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(
+                Language::from_shebang(line),
+                expected,
+                "{}",
+                String::from_utf8_lossy(line)
+            );
+        }
     }
 
     #[test]

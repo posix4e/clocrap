@@ -162,21 +162,25 @@ pub fn scan(roots: &[PathBuf], options: &ScanOptions) -> Result<Vec<FileReport>,
     Ok(reports)
 }
 
-/// Whether the path has an extension clocrap knows.
+/// Whether the path has an extension clocrap knows, or none at all: a file
+/// without one is read and kept only if its `#!` line names a language.
 fn recognised(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(Language::from_extension)
-        .is_some()
+    match path.extension() {
+        None => true,
+        Some(extension) => extension
+            .to_str()
+            .and_then(Language::from_extension)
+            .is_some(),
+    }
 }
 
 /// Counts one file, or returns `None` if it is not a recognised text file or,
 /// in diff mode, has no changed lines.
 fn scan_file(path: &Path, options: &ScanOptions, analyzer: &mut Analyzer) -> Option<FileReport> {
-    let language = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(Language::from_extension)?;
+    let by_extension = match path.extension() {
+        Some(extension) => Some(extension.to_str().and_then(Language::from_extension)?),
+        None => None,
+    };
     let change = match &options.changed {
         Some(changed) => Some(changed.get(path)?),
         None => None,
@@ -191,6 +195,15 @@ fn scan_file(path: &Path, options: &ScanOptions, analyzer: &mut Analyzer) -> Opt
     if source[..source.len().min(BINARY_PROBE)].contains(&0) {
         return None;
     }
+    let language = match by_extension {
+        Some(language) => language,
+        None => Language::from_shebang(
+            source
+                .split(|&byte| byte == b'\n')
+                .next()
+                .unwrap_or_default(),
+        )?,
+    };
 
     let syntax = language.syntax();
     let mut counts = LineCounts::default();
