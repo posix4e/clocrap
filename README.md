@@ -70,6 +70,8 @@ Counts are by language, detected from the file extension:
 | C          | `c`, `h`                                   | `//`, `/* */`                       |
 | HTML       | `html`, `htm`                              | `<!-- -->`; text between tags is code |
 | CSS        | `css`                                      | `/* */`                             |
+| Lean       | `lean`                                     | `--`, nested `/- -/` (and `/--`, `/-!`) |
+| Objective-C | `m`, `mm`                                 | `//`, `/* */`                       |
 
 A file with no extension is read, and counted if its first line is a `#!`
 naming Python (`python`, `python3`, `python3.12`), a POSIX shell (`sh`,
@@ -78,7 +80,9 @@ the extensionless scripts most repositories keep in `scripts/` or `bin/`.
 
 A line is **blank** if it holds only whitespace, **comment** if it holds only
 comment text, and **code** otherwise. A comment marker inside a string is code.
-Doc comments (`///`, `//!`) are comments. Python docstrings are code, since
+Doc comments (`///`, `//!`, and Lean's `/--` and `/-!`) are comments. Lean's
+lines come from its own lexer, which reads interpolated strings such as
+`s!"{f "x"}"`, where matching quotes would lose its place. Python docstrings are code, since
 they are string literals. A whitespace-only line inside a multi-line string is
 still blank. A `#!` line is a comment, as `#` makes it in every language that
 uses one.
@@ -134,6 +138,13 @@ Complexity is 1 plus one for each decision point in the function's body:
   each `case`, `catch`, the ternary operator, `&&`, `||`, `??`.
 - Swift: `if`, `guard`, `for`, `while`, `repeat`, `catch`, each `switch` entry
   beyond the first, `&&`, `||`.
+- C and Objective-C: `if`, `for`, `while`, `do`, each `case` with a value (not
+  `default`), `@catch`, the ternary operator, `&&`, `||`.
+- Lean: `if` (so each `else if`), `unless`, `for`, `while`, `repeat`, `catch`,
+  `&&`, `||`, `∧`, `∨`, `<|>`, and each `|` alternative beyond the first of a
+  `match`, a `fun` or a definition by pattern matching. A `do` block's
+  `let some x := e | fallback` is one. A `termination_by` or `decreasing_by`
+  clause is a proof and adds nothing.
 
 Closures and lambdas count toward the function they sit in. A nested function
 is scored on its own. The `?` operator, `try` and `else` are not decision points.
@@ -157,8 +168,45 @@ cargo llvm-cov --locked --lcov --output-path lcov.info
 clocrap --crap --lcov lcov.info
 ```
 
-Functions are found with tree-sitter, for Rust, Python, Swift, TypeScript, TSX
-and JavaScript. Other languages have counts but no function list.
+Functions are found with tree-sitter, for Rust, Python, Swift, TypeScript, TSX,
+JavaScript, C and Objective-C (where a method is named by its selector, such as
+`-tap:at:`). Lean's are found from its tokens, since notation and macros make
+its grammar open-ended: `def`, `abbrev`, `instance` and `opaque` declarations
+are functions, and each helper in a `where` block is one of its own, named
+`outer.helper`. Theorems, lemmas and examples are proofs the kernel checks and
+never run, so they are not scored, and nor are structures, inductives,
+classes and syntax. Other languages have counts but no function list.
+
+### Lean coverage
+
+Lean compiles to C, one file per module under `.lake/build/ir/`, with no line
+directives back to the `.lean` source. clocrap reads an lcov report of that C
+and gives each declaration the C functions that carry its mangled name: its
+own, its lambdas, the copies of other functions specialised for it, and its
+`where` helpers' when they are not scored on their own. `___boxed` wrappers,
+module initialisers and `match` splitters (compiled for proofs, never called)
+are left out. A declaration's coverage is the share of
+those functions' instrumented C lines that ran. A declaration with no C of its
+own (inlined everywhere, a type, or run only at compile time) has no coverage,
+and the report says how many were left out for that.
+
+Lean's toolchain ships clang without LLVM's profile runtime, so the build uses
+Apple's, through `scripts/lean-cov-cc`:
+
+```bash
+find . -path '*/.lake/build/ir/*' -name '*.c.o*' -delete   # Lake does not track LEAN_CC
+LEAN_CC=/path/to/clocrap/scripts/lean-cov-cc lake build <test executables>
+LLVM_PROFILE_FILE="$PWD/cov/%c%p.profraw" .lake/build/bin/<test>
+xcrun llvm-profdata merge -o cov.profdata cov/*.profraw
+xcrun llvm-cov export -format=lcov -instr-profile cov.profdata .lake/build/bin/<test> > lcov.info
+clocrap --lcov lcov.info
+```
+
+`%c` is LLVM's continuous mode: counters go to the file as the program runs,
+so a process that is killed, such as an app a test harness stops, keeps its
+coverage. Export each test executable's profile on its own and concatenate
+the lcov files (clocrap adds the hits up): two executables often hold
+different functions under one name, such as each one's `main`.
 
 ### The gate
 

@@ -1,4 +1,5 @@
-//! Cyclomatic complexity per function, from a tree-sitter parse.
+//! Cyclomatic complexity per function, from a tree-sitter parse, or for Lean
+//! from its tokens (see `lean`).
 //!
 //! A function's complexity is 1 plus one for each decision point in its body:
 //! `if`, `while`, `for`, `loop`, each `match` arm beyond the first, `&&`, `||`,
@@ -23,6 +24,19 @@ pub struct Function {
     /// 1-based last line of the function.
     pub end_line: u64,
     pub complexity: u32,
+    /// The name the compiler gives the function, when coverage is matched by
+    /// symbol rather than by line. Lean only: its coverage comes from the C it
+    /// compiles to.
+    pub symbol: Option<Symbol>,
+}
+
+/// A Lean declaration's full name, as the compiler knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    /// The name with its namespaces, such as `WinnowApp.Main.trace`.
+    pub name: String,
+    /// Whether it is `private`, which puts the module's name into the C name.
+    pub private: bool,
 }
 
 /// The grammars clocrap can parse. TSX is its own grammar, so `.tsx` files
@@ -35,6 +49,8 @@ enum Grammar {
     TypeScript,
     Tsx,
     JavaScript,
+    C,
+    ObjectiveC,
 }
 
 impl Grammar {
@@ -46,6 +62,8 @@ impl Grammar {
             Language::TypeScript if extension.eq_ignore_ascii_case("tsx") => Grammar::Tsx,
             Language::TypeScript => Grammar::TypeScript,
             Language::JavaScript => Grammar::JavaScript,
+            Language::C => Grammar::C,
+            Language::ObjectiveC => Grammar::ObjectiveC,
             _ => return None,
         })
     }
@@ -58,6 +76,8 @@ impl Grammar {
             Grammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Grammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Grammar::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Grammar::C => tree_sitter_c::LANGUAGE.into(),
+            Grammar::ObjectiveC => tree_sitter_objc::LANGUAGE.into(),
         }
     }
 
@@ -65,7 +85,7 @@ impl Grammar {
     fn is_function(self, kind: &str) -> bool {
         match self {
             Grammar::Rust => kind == "function_item",
-            Grammar::Python => kind == "function_definition",
+            Grammar::Python | Grammar::C => kind == "function_definition",
             Grammar::Swift => matches!(kind, "function_declaration" | "init_declaration"),
             Grammar::TypeScript | Grammar::Tsx | Grammar::JavaScript => matches!(
                 kind,
@@ -77,6 +97,7 @@ impl Grammar {
                     | "method_definition"
                     | "arrow_function"
             ),
+            Grammar::ObjectiveC => matches!(kind, "function_definition" | "method_definition"),
         }
     }
 
@@ -125,6 +146,18 @@ impl Grammar {
                 "binary_expression" if operator_is(node, source, &["&&", "||", "??"]) => 1,
                 _ => 0,
             },
+            // A `default:` is a `case_statement` with no value, and adds nothing.
+            Grammar::C | Grammar::ObjectiveC => match kind {
+                "if_statement"
+                | "for_statement"
+                | "while_statement"
+                | "do_statement"
+                | "conditional_expression"
+                | "catch_clause" => 1,
+                "case_statement" if node.child_by_field_name("value").is_some() => 1,
+                "binary_expression" if operator_is(node, source, &["&&", "||"]) => 1,
+                _ => 0,
+            },
         }
     }
 }
@@ -152,12 +185,15 @@ impl Analyzer {
     /// Whether a file of this language and extension has a grammar here.
     #[must_use]
     pub fn supports(language: Language, path: &Path) -> bool {
-        Grammar::for_file(language, extension_of(path)).is_some()
+        language == Language::Lean || Grammar::for_file(language, extension_of(path)).is_some()
     }
 
     /// The functions in `source`, in source order. Returns an empty list for
     /// languages without a grammar, and for files the parser cannot read.
     pub fn functions(&mut self, language: Language, path: &Path, source: &[u8]) -> Vec<Function> {
+        if language == Language::Lean {
+            return crate::lean::functions(source);
+        }
         let Some(grammar) = Grammar::for_file(language, extension_of(path)) else {
             return Vec::new();
         };
@@ -177,6 +213,7 @@ impl Analyzer {
                     start_line: row_to_line(node.start_position().row),
                     end_line: row_to_line(node.end_position().row),
                     complexity: complexity_of(grammar, node, source),
+                    symbol: None,
                 });
             }
             let mut cursor = node.walk();
@@ -229,6 +266,17 @@ fn function_name(node: Node, source: &[u8]) -> String {
     if let Some(name) = node.child_by_field_name("name") {
         return text_of(name, source);
     }
+    // C: the name sits inside the declarator, under any pointer declarators.
+    let mut declarator = node.child_by_field_name("declarator");
+    while let Some(d) = declarator {
+        if d.kind() == "identifier" {
+            return text_of(d, source);
+        }
+        declarator = d.child_by_field_name("declarator");
+    }
+    if node.kind() == "method_definition" {
+        return objc_selector(node, source);
+    }
     if let Some(parent) = node.parent() {
         let binding = match parent.kind() {
             "variable_declarator" | "public_field_definition" => parent.child_by_field_name("name"),
@@ -240,6 +288,31 @@ fn function_name(node: Node, source: &[u8]) -> String {
         }
     }
     "<anonymous>".to_string()
+}
+
+/// An Objective-C method's selector, as `-tap:at:` or `+shared`.
+fn objc_selector(node: Node, source: &[u8]) -> String {
+    let mut selector = String::new();
+    let mut cursor = node.walk();
+    let mut takes_arguments = false;
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "-" | "+" if selector.is_empty() => selector.push_str(child.kind()),
+            "identifier" => {
+                if takes_arguments {
+                    selector.push(':');
+                }
+                selector.push_str(&text_of(child, source));
+            }
+            "method_parameter" => takes_arguments = true,
+            "compound_statement" => break,
+            _ => {}
+        }
+    }
+    if takes_arguments {
+        selector.push(':');
+    }
+    selector
 }
 
 fn text_of(node: Node, source: &[u8]) -> String {
@@ -431,6 +504,57 @@ func f(a: Bool, b: Bool, xs: [Int], n: Int) -> Int {
 }
 ";
         assert_eq!(complexity("a.swift", source), [("f".to_string(), 7)]);
+    }
+
+    #[test]
+    fn c_functions_and_decisions() {
+        // 1 base, `if` 1, `&&` 1, `for` 1, two valued `case`s 2, `?:` 1.
+        let source = "\
+static int *f(int a, int b) {
+    if (a && b) return 0;
+    for (;;) {}
+    switch (a) {
+    case 1: return 0;
+    case 2: return 0;
+    default: return b ? 0 : 0;
+    }
+}
+";
+        assert_eq!(complexity("a.c", source), [("f".to_string(), 7)]);
+    }
+
+    #[test]
+    fn objective_c_methods_and_functions() {
+        let source = "\
+@implementation T
+- (void)tap:(id)x at:(int)n {
+    if (n > 0 && x) { [x go]; }
+    @try { [x go]; } @catch (NSException *e) {}
+}
++ (instancetype)shared { return nil; }
+@end
+static void g(void) { while (1) {} }
+";
+        assert_eq!(
+            complexity("a.m", source),
+            [
+                ("-tap:at:".to_string(), 4),
+                ("+shared".to_string(), 1),
+                ("g".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn lean_functions_come_from_tokens() {
+        assert_eq!(
+            complexity(
+                "a.lean",
+                "def f (n : Nat) : Nat := if n = 0 then 1 else n\n"
+            ),
+            [("f".to_string(), 2)]
+        );
+        assert!(Analyzer::supports(Language::Lean, Path::new("a.lean")));
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub mod crap;
 pub mod diff;
 pub mod lang;
 pub mod lcov;
+pub mod lean;
+pub mod leancov;
 pub mod report;
 pub mod vcs;
 pub mod walk;

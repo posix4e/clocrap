@@ -322,6 +322,13 @@ fn write_function_notes(
             ranking.left_out
         )?;
     }
+    if ranking.no_code > 0 {
+        writeln!(
+            out,
+            "{} Lean functions compiled to no code of their own (inlined, a type, or compile-time only), so have no coverage and were left out",
+            ranking.no_code
+        )?;
+    }
     let unlisted = scored.iter().filter(|s| s.missing_from_report).count();
     if count_unlisted && unlisted > 0 {
         writeln!(
@@ -355,6 +362,7 @@ pub fn json_functions(ranking: &Ranking, cwd: &Path, threshold: f64) -> Value {
         "threshold": threshold,
         "over_threshold": crate::crap::over_threshold(scored, threshold),
         "left_out": ranking.left_out,
+        "no_code": ranking.no_code,
         "functions": functions,
     })
 }

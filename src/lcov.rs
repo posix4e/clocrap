@@ -1,5 +1,7 @@
 //! Line coverage from lcov files: the format `cargo llvm-cov --lcov` and most
-//! other coverage tools write. Only the `SF:` and `DA:` records are read.
+//! other coverage tools write. The `SF:`, `DA:` and `FN:` records are read:
+//! `FN:` names each function's first line, which Lean's coverage needs (see
+//! `leancov`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -10,6 +12,8 @@ pub struct Coverage {
     /// Keyed by the file's path as the report gives it, canonicalised when the
     /// file exists. Each value maps a 1-based line to its hit count.
     files: HashMap<PathBuf, BTreeMap<u64, u64>>,
+    /// Each file's functions: first line to name.
+    functions: HashMap<PathBuf, BTreeMap<u64, String>>,
 }
 
 impl Coverage {
@@ -42,6 +46,14 @@ impl Coverage {
                     let total = lines.entry(number).or_insert(0);
                     *total = total.saturating_add(hits);
                 }
+            } else if let Some(record) = line.strip_prefix("FN:") {
+                if let (Some(file), Some((number, name))) = (&current, parse_fn(record)) {
+                    coverage
+                        .functions
+                        .entry(file.clone())
+                        .or_default()
+                        .insert(number, name.to_string());
+                }
             } else if line == "end_of_record" {
                 current = None;
             }
@@ -58,6 +70,38 @@ impl Coverage {
                 *total = total.saturating_add(hits);
             }
         }
+        for (path, functions) in &other.functions {
+            let mine = self.functions.entry(path.clone()).or_default();
+            for (&number, name) in functions {
+                mine.entry(number).or_insert_with(|| name.clone());
+            }
+        }
+    }
+
+    /// Every file the report has line records for.
+    pub fn files(&self) -> impl Iterator<Item = &Path> {
+        self.files.keys().map(PathBuf::as_path)
+    }
+
+    /// The functions the report names in `path`, by first line.
+    #[must_use]
+    pub fn functions_of(&self, path: &Path) -> Option<&BTreeMap<u64, String>> {
+        self.functions.get(path)
+    }
+
+    /// The instrumented lines in `start..=end`, and how many of them ran.
+    #[must_use]
+    pub fn hits(&self, path: &Path, start: u64, end: u64) -> (u32, u32) {
+        let (mut total, mut covered) = (0_u32, 0_u32);
+        if let Some(lines) = self.lines_of(path) {
+            for (_, &hits) in lines.range(start..=end) {
+                total = total.saturating_add(1);
+                if hits > 0 {
+                    covered = covered.saturating_add(1);
+                }
+            }
+        }
+        (total, covered)
     }
 
     /// Whether the report has any record for `path`.
@@ -72,14 +116,8 @@ impl Coverage {
     /// file at all.
     #[must_use]
     pub fn ratio(&self, path: &Path, start: u64, end: u64) -> Option<f64> {
-        let lines = self.lines_of(path)?;
-        let (mut total, mut covered) = (0_u32, 0_u32);
-        for (_, &hits) in lines.range(start..=end) {
-            total = total.saturating_add(1);
-            if hits > 0 {
-                covered = covered.saturating_add(1);
-            }
-        }
+        self.lines_of(path)?;
+        let (total, covered) = self.hits(path, start, end);
         if total == 0 {
             return Some(0.0);
         }
@@ -99,6 +137,17 @@ fn parse_da(record: &str) -> Option<(u64, u64)> {
     let number = fields.next()?.trim().parse().ok()?;
     let hits = fields.next()?.trim().parse().ok()?;
     Some((number, hits))
+}
+
+/// `FN:<line>,<name>`, or `FN:<line>,<end line>,<name>` as newer lcov writes.
+fn parse_fn(record: &str) -> Option<(u64, &str)> {
+    let (number, rest) = record.split_once(',')?;
+    let number = number.trim().parse().ok()?;
+    let name = match rest.split_once(',') {
+        Some((end, name)) if end.trim().parse::<u64>().is_ok() => name,
+        _ => rest,
+    };
+    Some((number, name.trim()))
 }
 
 fn canonical_or_same(path: &Path) -> PathBuf {
@@ -162,6 +211,15 @@ end_of_record
         let only_first = Coverage::parse("SF:/x/b.rs\nDA:1,0\nend_of_record\n");
         first.merge(&only_first);
         assert_eq!(first.ratio(Path::new("/x/b.rs"), 1, 1), Some(0.0));
+    }
+
+    #[test]
+    fn function_records_name_first_lines() {
+        let coverage =
+            Coverage::parse("SF:/x/a.c\nFN:3,f\nFN:9,12,g\nFN:20,a.c:h\nDA:3,1\nend_of_record\n");
+        let functions = coverage.functions_of(Path::new("/x/a.c")).unwrap();
+        let named: Vec<(u64, &str)> = functions.iter().map(|(&n, s)| (n, s.as_str())).collect();
+        assert_eq!(named, [(3, "f"), (9, "g"), (20, "a.c:h")]);
     }
 
     #[test]

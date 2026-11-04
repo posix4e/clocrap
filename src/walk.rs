@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ignore::WalkBuilder;
 
 use crate::complexity::{Analyzer, Function};
-use crate::count::{LineCounts, for_each_line};
+use crate::count::{LineCounts, for_each_line_of};
 use crate::diff::ChangedLines;
 use crate::lang::Language;
 use crate::vcs;
@@ -205,9 +205,8 @@ fn scan_file(path: &Path, options: &ScanOptions, analyzer: &mut Analyzer) -> Opt
         )?,
     };
 
-    let syntax = language.syntax();
     let mut counts = LineCounts::default();
-    for_each_line(&source, &syntax, |number, kind| {
+    for_each_line_of(language, &source, |number, kind| {
         if change.is_none_or(|change| change.contains(number)) {
             counts.record(kind);
         }

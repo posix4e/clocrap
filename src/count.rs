@@ -78,12 +78,25 @@ pub fn for_each_line(source: &[u8], syntax: &Syntax, mut visit: impl FnMut(u64, 
     }
 }
 
+/// `for_each_line` for a file of `language`. Lean's lines come from its own
+/// lexer, which knows interpolated strings.
+pub fn for_each_line_of(language: Language, source: &[u8], mut visit: impl FnMut(u64, LineKind)) {
+    if language == Language::Lean
+        && let Some(kinds) = crate::lean::line_kinds(source)
+    {
+        for (number, kind) in (1..).zip(kinds) {
+            visit(number, kind);
+        }
+        return;
+    }
+    for_each_line(source, &language.syntax(), visit);
+}
+
 /// Counts the lines of `source` by kind.
 #[must_use]
 pub fn count_lines(source: &[u8], language: Language) -> LineCounts {
-    let syntax = language.syntax();
     let mut counts = LineCounts::default();
-    for_each_line(source, &syntax, |_, kind| counts.record(kind));
+    for_each_line_of(language, source, |_, kind| counts.record(kind));
     counts
 }
 

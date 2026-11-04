@@ -18,6 +18,8 @@ pub enum Language {
     C,
     Html,
     Css,
+    Lean,
+    ObjectiveC,
 }
 
 /// A block comment such as `/* ... */`.
@@ -56,6 +58,7 @@ pub struct Syntax {
 const SLASH: &[&[u8]] = &[b"//"];
 const HASH: &[&[u8]] = &[b"#"];
 const NONE: &[&[u8]] = &[];
+const DASH: &[&[u8]] = &[b"--"];
 
 const DQ: StringSyntax = StringSyntax {
     open: b"\"",
@@ -104,6 +107,12 @@ const NESTED_C_BLOCK: BlockComment = BlockComment {
     close: b"*/",
     nests: true,
 };
+/// Lean's `/- -/`, which nests; `/--` doc comments and `/-!` module docs are the same comment.
+const LEAN_BLOCK: BlockComment = BlockComment {
+    open: b"/-",
+    close: b"-/",
+    nests: true,
+};
 const HTML_BLOCK: BlockComment = BlockComment {
     open: b"<!--",
     close: b"-->",
@@ -132,9 +141,37 @@ const RUST_STRINGS: &[StringSyntax] = &[
     DQ,
 ];
 
+/// Lean's raw strings (`r"..."`, `r#"..."#`) have no escapes; plain strings may span lines.
+const LEAN_STRINGS: &[StringSyntax] = &[
+    StringSyntax {
+        open: b"r##\"",
+        close: b"\"##",
+        escapes: false,
+        multiline: true,
+    },
+    StringSyntax {
+        open: b"r#\"",
+        close: b"\"#",
+        escapes: false,
+        multiline: true,
+    },
+    StringSyntax {
+        open: b"r\"",
+        close: b"\"",
+        escapes: false,
+        multiline: true,
+    },
+    StringSyntax {
+        open: b"\"",
+        close: b"\"",
+        escapes: true,
+        multiline: true,
+    },
+];
+
 impl Language {
     /// Every language, in the order they are documented.
-    pub const ALL: [Language; 14] = [
+    pub const ALL: [Language; 16] = [
         Language::Rust,
         Language::Toml,
         Language::Json,
@@ -149,6 +186,8 @@ impl Language {
         Language::C,
         Language::Html,
         Language::Css,
+        Language::Lean,
+        Language::ObjectiveC,
     ];
 
     /// The name printed in reports.
@@ -169,6 +208,8 @@ impl Language {
             Language::C => "C",
             Language::Html => "HTML",
             Language::Css => "CSS",
+            Language::Lean => "Lean",
+            Language::ObjectiveC => "Objective-C",
         }
     }
 
@@ -191,6 +232,8 @@ impl Language {
             "c" | "h" => Language::C,
             "html" | "htm" => Language::Html,
             "css" => Language::Css,
+            "lean" => Language::Lean,
+            "m" | "mm" => Language::ObjectiveC,
             _ => return None,
         })
     }
@@ -276,7 +319,7 @@ impl Language {
                 strings: &[DQ, SQ],
                 char_literals: false,
             },
-            Language::C => Syntax {
+            Language::C | Language::ObjectiveC => Syntax {
                 line_comments: SLASH,
                 block: Some(C_BLOCK),
                 strings: &[DQ],
@@ -295,6 +338,14 @@ impl Language {
                 block: Some(C_BLOCK),
                 strings: &[DQ, SQ_ESC],
                 char_literals: false,
+            },
+            // `'a'` is a character literal. The prime in a name such as `x'` is not, since no
+            // single character and closing quote follow it.
+            Language::Lean => Syntax {
+                line_comments: DASH,
+                block: Some(LEAN_BLOCK),
+                strings: LEAN_STRINGS,
+                char_literals: true,
             },
         }
     }
@@ -336,6 +387,9 @@ mod tests {
         assert_eq!(Language::from_extension("h"), Some(Language::C));
         assert_eq!(Language::from_extension("HTML"), Some(Language::Html));
         assert_eq!(Language::from_extension("css"), Some(Language::Css));
+        assert_eq!(Language::from_extension("lean"), Some(Language::Lean));
+        assert_eq!(Language::from_extension("m"), Some(Language::ObjectiveC));
+        assert_eq!(Language::from_extension("mm"), Some(Language::ObjectiveC));
     }
 
     #[test]

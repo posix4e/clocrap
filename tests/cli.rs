@@ -361,3 +361,62 @@ fn diff_with_crap_keeps_only_functions_that_contain_a_changed_line() {
     assert_eq!(names, ["g"]);
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn lean_functions_take_their_coverage_from_the_c_they_compile_to() {
+    let dir = fixture("lean");
+    write(
+        &dir.join("pkg/Cov/Basic.lean"),
+        "\
+namespace Cov
+/-- Tested. -/
+def classify (n : Nat) : String :=
+  if n == 0 then \"zero\" else if n % 2 == 0 then \"even\" else \"odd\"
+def unused (n : Nat) : Nat := match n with
+  | 0 => 1
+  | k + 1 => k * 2
+@[inline] def inlined (n : Nat) : Nat := n
+theorem t : 1 = 1 := rfl
+end Cov
+",
+    );
+    // The C file must exist, so its path canonicalises like the Lean file's.
+    let c_file = dir.join("pkg/.lake/build/ir/Cov/Basic.c");
+    write(&c_file, "");
+    let c_file = fs::canonicalize(&c_file).unwrap();
+    write(
+        &dir.join("lcov.info"),
+        &format!(
+            "SF:{}\nFN:10,lp_pkg_Cov_classify\nFN:20,lp_pkg_Cov_classify___boxed\nFN:30,lp_pkg_Cov_unused\nFN:40,initialize_pkg_Cov_Basic\nDA:10,1\nDA:11,1\nDA:12,0\nDA:20,0\nDA:30,0\nDA:40,1\nend_of_record\n",
+            c_file.display()
+        ),
+    );
+    let output = clocrap(&dir, &["--json", "--lcov", "lcov.info", "pkg"]);
+    let json = stdout_json(&output);
+    assert_eq!(language(&json, "Lean")["code"], 9);
+    assert_eq!(language(&json, "Lean")["comment"], 1);
+    let crap = &json["functions"];
+    let rows: Vec<(String, u64, String)> = crap["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["name"].as_str().unwrap().to_string(),
+                f["complexity"].as_u64().unwrap(),
+                format!("{:.3}", f["coverage"].as_f64().unwrap()),
+            )
+        })
+        .collect();
+    // unused: complexity 2, untested, CRAP 6; classify: complexity 3, two of
+    // its three C lines ran.
+    assert_eq!(
+        rows,
+        [
+            ("unused".to_string(), 2, "0.000".to_string()),
+            ("classify".to_string(), 3, "0.667".to_string()),
+        ]
+    );
+    assert_eq!(crap["no_code"], 1);
+    fs::remove_dir_all(&dir).unwrap();
+}

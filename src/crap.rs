@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use crate::complexity::Function;
+use crate::lang::Language;
 use crate::lcov::Coverage;
 use crate::walk::FileReport;
 
@@ -49,6 +50,18 @@ pub struct Ranking {
     /// Functions in files the coverage report does not list, left out because
     /// the caller did not ask to count them.
     pub left_out: usize,
+    /// Lean functions in files the report covers that have no compiled code
+    /// of their own (inlined, a type, or compile-time only), so no coverage.
+    pub no_code: usize,
+}
+
+/// What the coverage data says about one function.
+enum Found {
+    Ratio(f64),
+    /// The report has no record of the function's file.
+    Unlisted,
+    /// The report covers the file, but the function compiled to no code.
+    NoCode,
 }
 
 /// Every function in `reports`, worst first. With coverage the order is by
@@ -61,16 +74,38 @@ pub struct Ranking {
 pub fn rank(reports: &[FileReport], coverage: Option<&Coverage>, count_unlisted: bool) -> Ranking {
     let mut scored = Vec::new();
     let mut left_out = 0;
+    let mut no_code = 0;
     for report in reports {
-        for function in &report.functions {
+        // Lean's coverage is of the C it compiles to, matched by name.
+        let lean =
+            match coverage {
+                Some(data) if report.language == Language::Lean => Some(
+                    crate::leancov::file_coverage(data, &report.path, &report.functions),
+                ),
+                _ => None,
+            };
+        for (index, function) in report.functions.iter().enumerate() {
             let (cov, missing_from_report) = match coverage {
                 None => (None, false),
                 Some(data) => {
-                    match data.ratio(&report.path, function.start_line, function.end_line) {
-                        Some(ratio) => (Some(ratio), false),
-                        None if count_unlisted => (Some(0.0), true),
-                        None => {
+                    let found = match &lean {
+                        Some(Some(per_function)) => {
+                            per_function[index].map_or(Found::NoCode, Found::Ratio)
+                        }
+                        Some(None) => Found::Unlisted,
+                        None => data
+                            .ratio(&report.path, function.start_line, function.end_line)
+                            .map_or(Found::Unlisted, Found::Ratio),
+                    };
+                    match found {
+                        Found::Ratio(ratio) => (Some(ratio), false),
+                        Found::Unlisted if count_unlisted => (Some(0.0), true),
+                        Found::Unlisted => {
                             left_out += 1;
+                            continue;
+                        }
+                        Found::NoCode => {
+                            no_code += 1;
                             continue;
                         }
                     }
@@ -97,6 +132,7 @@ pub fn rank(reports: &[FileReport], coverage: Option<&Coverage>, count_unlisted:
     Ranking {
         functions: scored,
         left_out,
+        no_code,
     }
 }
 
@@ -159,12 +195,14 @@ mod tests {
                     start_line: 1,
                     end_line: 3,
                     complexity: 9,
+                    symbol: None,
                 },
                 Function {
                     name: "untested".into(),
                     start_line: 5,
                     end_line: 9,
                     complexity: 3,
+                    symbol: None,
                 },
             ],
         };
@@ -209,6 +247,7 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 complexity,
+                symbol: None,
             },
             coverage,
             crap: coverage.map(|c| score(complexity, c)),
