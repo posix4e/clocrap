@@ -1,0 +1,14 @@
+name = "clocrap"
+version = "0.1.0"
+defaultTargets = ["clocrap"]
+
+[[lean_lib]]
+name = "Clocrap"
+
+[[lean_exe]]
+name = "clocrap"
+root = "Main"
+
+[[lean_exe]]
+name = "clocrap-test"
+root = "Tests"
