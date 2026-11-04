@@ -1,0 +1,21 @@
+#!/bin/sh
+# A C compiler for Lake that builds Lean code with LLVM source coverage, for clocrap's Lean CRAP scores:
+#
+#   find . -path '*/.lake/build/ir/*' -name '*.c.o*' -delete    # Lake does not track LEAN_CC
+#   LEAN_CC=/path/to/clocrap/scripts/lean-cov-cc lake build <targets>
+#   LLVM_PROFILE_FILE="$PWD/cov/%p-%m.profraw" .lake/build/bin/<test>
+#   xcrun llvm-profdata merge -o cov.profdata cov/*.profraw
+#   xcrun llvm-cov export -format=lcov -instr-profile cov.profdata <test> -object <other test> ... > lcov.info
+#   clocrap --lcov lcov.info
+#
+# Lean's own toolchain ships clang without the profile runtime, so this is Apple's clang (xcrun). Each compile
+# gets -fprofile-instr-generate -fcoverage-mapping; each link gets the profile runtime and the toolchain's lib
+# directory, where Lean keeps the gmp, libuv and OpenSSL it links against. Lake keeps C objects built with
+# another compiler, so delete them first (the `find` above); the Lean is not rebuilt, only its C.
+lib="$(lean --print-prefix)/lib"
+for arg in "$@"; do
+  if [ "$arg" = "-c" ]; then
+    exec xcrun clang "$@" -fprofile-instr-generate -fcoverage-mapping
+  fi
+done
+exec xcrun clang "$@" -fprofile-instr-generate -L"$lib"
