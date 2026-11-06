@@ -38,6 +38,13 @@ cp .lake/build/bin/clocrap ~/.local/bin/
 The Lean version is pinned in `lean-toolchain`, and elan fetches it. clocrap
 uses only Lean's own library: no C code, no tree-sitter, no other packages.
 
+Scoring Swift also needs a Swift toolchain, because Swift is read by the
+compiler's own parser. The first scan of Swift files builds a small reader
+against the SwiftSyntax that ships with the toolchain, which takes a few
+seconds, and keeps it in `~/.cache/clocrap`. Without a toolchain, clocrap says so
+on stderr and scores everything else. It has only been tried with Xcode's
+toolchain on macOS.
+
 ## Counting lines
 
 ```bash
@@ -134,7 +141,7 @@ Complexity is 1 plus one for each decision point in the function's body:
 - TypeScript and JavaScript: `if`, `for`, `for-in` and `for-of`, `while`, `do`,
   each `case`, `catch`, the ternary operator, `&&`, `||`, `??`.
 - Swift: `if`, `guard`, `for`, `while`, `repeat`, `catch`, each `switch` entry
-  beyond the first, `&&`, `||`.
+  beyond the first, the ternary operator, `&&`, `||`, `??`.
 - C and Objective-C: `if`, `for`, `while`, `do`, each `case` with a value (not
   `default`), `@catch`, the ternary operator, `&&`, `||`.
 - Lean: `if` (so each `else if`), `unless`, `for`, `while`, `repeat`, `catch`,
@@ -165,21 +172,33 @@ cargo llvm-cov --locked --lcov --output-path lcov.info
 clocrap --crap --lcov lcov.info
 ```
 
-Functions are found for Rust, Python, Swift, TypeScript, TSX, JavaScript, C,
+Functions are found for Rust, Python, TypeScript, TSX, JavaScript, C,
 Objective-C (where a method is named by its selector, such as `-tap:at:`) and
 Lean, each by its own analyzer in `Clocrap/`, which reads the file's tokens.
 One tokenizer (`Clocrap/Lex.lean`) knows each family's comments, strings and
-the code inside strings: template literals' `${…}`, Swift's `\(…)` and
-Python's f-string `{…}` are code, so a decision inside one counts.
+the code inside strings: template literals' `${…}` and Python's f-string `{…}`
+are code, so a decision inside one counts.
+
+Swift is read by SwiftSyntax, the compiler's own parser, in
+`Clocrap/SwiftReader.swift`. A function there is a `func`, `init` or `deinit`
+with a body, a getter written as a `var`'s or a `subscript`'s braces (so a
+SwiftUI `body` is scored), and an accessor with a body, named like `value.set`.
+Both branches of a `#if` count, and its condition does not. Code inside a
+string's `\(…)` counts.
 
 The analyzers give the answers tree-sitter's grammars give. clocrap used
 tree-sitter until it was rewritten in Lean, and the rewrite was checked by
 running both versions on fifteen repositories (Lean, Rust, Swift, TypeScript,
 JavaScript and Python) and 330 C and Objective-C files, and comparing their
 output byte for byte. Where tree-sitter has a quirk that changes a count, the
-analyzer copies it: a Swift `if case 1 = x` does not count, a Rust match guard's
-`if` does not count, and a Python comment after a function's last statement,
-indented as far as its body, is part of the function.
+analyzer copies it: a Rust match guard's `if` does not count, and a Python
+comment after a function's last statement, indented as far as its body, is part
+of the function.
+
+Swift's reader replaced an analyzer built the same way. Under that analyzer's
+rules, SwiftSyntax gave the same spans and complexities for all 15,903 functions
+the two share in four Swift codebases. The only two it did not report were
+`init`s with no body, in protocols.
 
 Lean's functions come from its tokens too, since notation and macros make its
 grammar open-ended: `def`, `abbrev`, `instance` and `opaque` declarations are
@@ -193,9 +212,6 @@ and syntax. Other languages have counts but no function list.
 Each of these is a file tree-sitter cannot parse, where its error recovery
 loses or misplaces functions that the analyzers find:
 
-- Swift: where tree-sitter's Swift grammar fails, as on a `for … where` clause
-  that calls `await`, it drops the loop from the count, or the functions after
-  the error.
 - C++ (in `.h` and `.mm` files): neither reads it. tree-sitter's C and
   Objective-C grammars do not know classes, namespaces or templates, and nor
   does the analyzer, so the two lose different functions.
@@ -294,7 +310,8 @@ distinct files, or cloc looks several times faster than it is.
 
 - Strings are tracked per line. A string that interpolates another string, as
   in a Swift `\(...)`, can confuse the line classifier when the inner string
-  holds a comment marker.
+  holds a comment marker. This is line counting only: Swift's functions and
+  complexity come from its parser.
 - Complexity is a count of decision nodes, not a full control-flow analysis.
 - Coverage is line coverage. A branch that never runs on a line that did run is
   not seen.

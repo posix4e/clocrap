@@ -7,7 +7,7 @@ import Clocrap.Function
 import Clocrap.LeanLang
 import Clocrap.Lex
 import Clocrap.RustLang
-import Clocrap.SwiftLang
+import Clocrap.SwiftReader
 import Clocrap.JsLang
 import Clocrap.PyLang
 import Clocrap.CLang

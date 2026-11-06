@@ -2,7 +2,6 @@ import Clocrap.Lang
 import Clocrap.Function
 import Clocrap.LeanLang
 import Clocrap.RustLang
-import Clocrap.SwiftLang
 import Clocrap.JsLang
 import Clocrap.PyLang
 import Clocrap.CLang
@@ -18,8 +17,9 @@ scored on its own and does not add to the function that contains it.
 The `?` operator, `try` and `else` are not decision points.
 
 Each language has its own reader, built on tokens rather than a full grammar: Lean in
-`Clocrap.LeanLang`, the C family, Rust, Swift, Python and JavaScript/TypeScript in their own
-modules.
+`Clocrap.LeanLang`, and the C family, Rust, Python and JavaScript/TypeScript in their own modules.
+Swift is the exception. It is read by the compiler's own parser, as a batch, so `Clocrap.Walk`
+calls `Clocrap.SwiftReader` itself.
 -/
 
 namespace Clocrap.Complexity
@@ -31,14 +31,13 @@ def supports (language : Language) (_path : String) : Bool :=
   | _ => false
 
 /-- The functions in `source`, in source order. Empty for languages without a reader and for files
-the reader cannot read. -/
+the reader cannot read, and empty for Swift, which `Clocrap.SwiftReader` reads. -/
 def functions (language : Language) (path : String) (source : ByteArray) : Array Function :=
   -- TSX is its own grammar: `.ts` reads `<T>x` as a type assertion, `.tsx` as JSX.
   let tsx := path.toLower.endsWith ".tsx"
   match language with
   | .lean => LeanLang.functions source
   | .rust => RustLang.functions source
-  | .swift => SwiftLang.functions source
   | .typeScript => JsLang.functions source true tsx
   | .javaScript => JsLang.functions source false true
   | .python => PyLang.functions source
