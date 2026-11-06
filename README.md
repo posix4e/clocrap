@@ -249,7 +249,7 @@ different functions under one name, such as each one's `main`.
 
 With `--lcov`, a function whose CRAP score is above `--threshold` (default 30,
 the usual CRAP limit) makes the command exit with status 1 after printing the
-report. That is the gate for CI:
+report. That makes it a quick local check of a change:
 
 ```bash
 clocrap --lcov lcov.info --threshold 30
