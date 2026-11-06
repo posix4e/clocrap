@@ -45,12 +45,9 @@ structure Scored where
   missingFromReport : Bool
   deriving Inhabited
 
-/-- The functions of a scan, worst first, and how many were left out. -/
+/-- The functions of a scan, worst first, and how many could not be scored. -/
 structure Ranking where
   functions : Array Scored
-  /-- Functions in files the coverage report does not list, left out because the caller did not
-  ask to count them. -/
-  leftOut : Nat
   /-- Lean functions in files the report covers that have no compiled code of their own (inlined,
   a type, or compile-time only), so no coverage. -/
   noCode : Nat
@@ -81,13 +78,10 @@ def order (a b : Scored) : Ordering :=
 /-- Every function in `reports`, worst first. With coverage the order is by CRAP score; without
 it, by complexity, and the scores are `none`.
 
-A file the coverage report does not list is usually one it leaves out on purpose, such as test
-code. Its functions are left out unless `countUnlisted` is set, in which case they count as 0%
+A file the coverage report does not list has not been shown to run, so its functions count as 0%
 covered. -/
-def rank (reports : Array FileReport) (coverage : Option Coverage) (countUnlisted : Bool) :
-    IO Ranking := do
+def rank (reports : Array FileReport) (coverage : Option Coverage) : IO Ranking := do
   let mut scored := #[]
-  let mut leftOut := 0
   let mut noCode := 0
   let mut inlined := 0
   -- Lean's coverage is of the C it compiles to, matched by name across every module's C.
@@ -119,12 +113,8 @@ def rank (reports : Array FileReport) (coverage : Option Coverage) (countUnliste
         match found with
         | .ratio r => cov := some r
         | .unlisted =>
-          if countUnlisted then
-            cov := some 0.0
-            missing := true
-          else
-            leftOut := leftOut + 1
-            continue
+          cov := some 0.0
+          missing := true
         | .noCode =>
           noCode := noCode + 1
           continue
@@ -135,7 +125,7 @@ def rank (reports : Array FileReport) (coverage : Option Coverage) (countUnliste
         path := report.path, function, coverage := cov,
         crap := cov.map (score function.complexity ·), missingFromReport := missing }
   let sorted := scored.toList.mergeSort (fun a b => order a b != .gt) |>.toArray
-  return { functions := sorted, leftOut, noCode, inlined }
+  return { functions := sorted, noCode, inlined }
 
 /-- How many functions score above `threshold`. -/
 def overThreshold (scored : Array Scored) (threshold : Float) : Nat :=

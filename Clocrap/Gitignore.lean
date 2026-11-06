@@ -2,7 +2,7 @@ import Clocrap.Str
 /-!
 # Ignore files
 
-`--walk` and trees outside git honour `.gitignore` the way ripgrep's `ignore` crate does with
+Trees outside git honour `.gitignore` the way ripgrep's `ignore` crate does with
 `require_git(false)`, which the Rust clocrap used:
 
 - Each directory may hold a `.ignore` and a `.gitignore`; a directory with `.git` also has

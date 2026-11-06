@@ -11,7 +11,9 @@ namespace Clocrap.Vcs
 /-- Runs git, or returns `none` when git cannot be started at all (it is not installed). -/
 def runGit (args : Array String) : IO (Option IO.Process.Output) := do
   try
-    return some (← IO.Process.output { cmd := "git", args })
+    let out ← IO.Process.output { cmd := "git", args }
+    -- On macOS and Linux a program that is not there fails in the child, after the spawn.
+    return if out.stderr.contains "could not execute external process" then none else some out
   catch
     | .noFileOrDirectory .. => return none
     | e => throw e

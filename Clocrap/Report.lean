@@ -6,7 +6,7 @@ import Clocrap.Walk
 /-!
 # Reports
 
-Turns scan results into the table, per-file listing and JSON that the command prints.
+Turns scan results into the tables and JSON that the command prints.
 -/
 
 namespace Clocrap.Report
@@ -65,36 +65,19 @@ def table (reports : Array FileReport) : String := Id.run do
   for ((language, _), row) in rows.zip cells do out := out ++ line language.name row
   return out ++ rule ++ "\n" ++ line "SUM:" sum
 
-/-- One row per file, in path order. -/
-def byFile (reports : Array FileReport) (cwd : String) : String := Id.run do
-  let rows := reports.map fun r =>
-    #[displayPath r.path cwd, r.language.name, toString r.counts.blank, toString r.counts.comment,
-      toString r.counts.code]
-  let pathWidth := rows.foldl (fun m r => max m (width r[0]!)) "File".length
-  let langWidth := rows.foldl (fun m r => max m (width r[1]!)) "Language".length
-  let line (r : Array String) : String :=
-    padRight r[0]! pathWidth ++ "  " ++ padRight r[1]! langWidth ++ "  " ++ padLeft r[2]! 7 ++
-      "  " ++ padLeft r[3]! 7 ++ "  " ++ padLeft r[4]! 7 ++ "\n"
-  let mut out := line #["File", "Language", "blank", "comment", "code"]
-  for r in rows do out := out ++ line r
-  return out
-
 def countsJson (c : LineCounts) : Array (String × Json) :=
   #[("blank", .nat c.blank), ("comment", .nat c.comment), ("code", .nat c.code)]
 
-/-- The JSON document for a scan: per-language totals, the grand total, and with `byFile` the
-per-file rows. -/
-def jsonCounts (reports : Array FileReport) (cwd : String) (byFile : Bool) : Array (String × Json) :=
+/-- The JSON document for a scan: per-language totals, the grand total and the per-file rows. -/
+def jsonCounts (reports : Array FileReport) (cwd : String) : Array (String × Json) :=
   let languages := (byLanguage reports).map fun (language, total) =>
     Json.obj (#[("language", .str language.name), ("files", .nat total.files)] ++ countsJson total.counts)
   let total := grandTotal reports
-  let document := #[("languages", Json.arr languages),
-    ("total", .obj (#[("files", .nat total.files)] ++ countsJson total.counts))]
-  if byFile then
-    document.push ("files", .arr (reports.map fun r =>
+  #[("languages", Json.arr languages),
+    ("total", .obj (#[("files", .nat total.files)] ++ countsJson total.counts)),
+    ("files", .arr (reports.map fun r =>
       .obj (#[("path", .str (displayPath r.path cwd)), ("language", .str r.language.name)] ++
-        countsJson r.counts)))
-  else document
+        countsJson r.counts)))]
 
 /-- The cells of one row of the functions table. -/
 def functionCells (s : Crap.Scored) (cwd : String) (hasCoverage : Bool) (threshold : Float) :
@@ -108,36 +91,38 @@ def functionCells (s : Crap.Scored) (cwd : String) (hasCoverage : Bool) (thresho
       (s.coverage.map fun r => Num.fixed (r * 100.0) 0 ++ "%").getD "-", s.function.name,
       location ++ over]
 
-/-- The lines under the functions table: the gate's count, and what was left out or counted as
-untested. -/
-def functionNotes (ranking : Crap.Ranking) (threshold : Float) (countUnlisted : Bool) : String :=
-  Id.run do
+/-- Functions the table shows when none is over the threshold. -/
+def shownFunctions : Nat := 20
+
+/-- The lines under the functions table: what the table cut, the gate's count, and what was left
+out or counted as untested. -/
+def functionNotes (ranking : Crap.Ranking) (threshold : Float) (hidden : Nat) : String := Id.run do
   let scored := ranking.functions
+  let cut := if hidden > 0 then s!"\n{hidden} more functions; --json lists them all\n" else ""
   if scored[0]!.crap.isNone then
-    return "\nno coverage data, so CRAP is not computed: complexity only (pass --lcov)\n"
+    return cut ++ "\nno coverage data, so CRAP is not computed: complexity only (pass --lcov)\n"
   let over := Crap.overThreshold scored threshold
-  let mut out := s!"\n{over} of {scored.size} functions above the CRAP threshold of {Num.display threshold}\n"
-  if ranking.leftOut > 0 then
-    out := out ++ s!"{ranking.leftOut} functions in files the coverage report does not list were left out; --count-unlisted scores them as untested\n"
+  let mut out := cut ++ s!"\n{over} of {scored.size} functions above the CRAP threshold of {Num.display threshold}\n"
   if ranking.noCode > 0 then
     out := out ++ s!"{ranking.noCode} Lean functions compiled to no code of their own (inlined, a type, or compile-time only), so have no coverage and were left out\n"
   if ranking.inlined > 0 then
     out := out ++ s!"{ranking.inlined} Lean functions were inlined into their callers and their own C never ran, so their coverage cannot be told and they were left out\n"
-  let unlisted := scored.foldl (fun n s => if s.missingFromReport then n + 1 else n) 0
-  if countUnlisted && unlisted > 0 then
+  let unlisted : Nat := scored.foldl (fun n s => if s.missingFromReport then n + 1 else n) 0
+  if unlisted > 0 then
     out := out ++ s!"{unlisted} functions in files the coverage report does not list count as 0% covered\n"
   return out
 
-/-- The functions, worst first. With coverage the table shows the CRAP score and flags each
-function above `threshold`. Without coverage it shows complexity only. -/
-def functions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) (countUnlisted : Bool) :
-    String := Id.run do
+/-- The worst functions, and every one above `threshold`. With coverage the table shows the CRAP
+score and flags each function above `threshold`. Without coverage it shows complexity only. -/
+def functions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) : String := Id.run do
   let scored := ranking.functions
   if scored.isEmpty then return "no functions found\n"
   let hasCoverage := scored[0]!.crap.isSome
   let header := if hasCoverage then #["CRAP", "complexity", "coverage", "function", "location"]
     else #["complexity", "function", "location"]
-  let rows := scored.map (functionCells · cwd hasCoverage threshold)
+  -- Worst first, so what is over the threshold comes before what is cut.
+  let shown := scored.extract 0 (max shownFunctions (Crap.overThreshold scored threshold))
+  let rows := shown.map (functionCells · cwd hasCoverage threshold)
   let widths := (Array.range header.size).map fun column =>
     rows.foldl (fun m row => max m (width row[column]!)) (width header[column]!)
   -- The function name is left-aligned, and so is the location, which ends the row. Every other
@@ -151,7 +136,7 @@ def functions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) (count
     trimEnd ("  ".intercalate padded.toList) ++ "\n"
   let mut out := line header
   for row in rows do out := out ++ line row
-  return out ++ functionNotes ranking threshold countUnlisted
+  return out ++ functionNotes ranking threshold (scored.size - shown.size)
 
 /-- The CRAP section of the JSON document. -/
 def jsonFunctions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) : Json :=
@@ -162,8 +147,7 @@ def jsonFunctions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) : 
     ("crap", .option .float s.crap), ("missing_from_report", .bool s.missingFromReport)]
   .obj #[("threshold", .float threshold),
     ("over_threshold", .nat (Crap.overThreshold ranking.functions threshold)),
-    ("left_out", .nat ranking.leftOut), ("no_code", .nat ranking.noCode),
-    ("inlined", .nat ranking.inlined),
+    ("no_code", .nat ranking.noCode), ("inlined", .nat ranking.inlined),
     ("functions", .arr functions)]
 
 end Clocrap.Report
