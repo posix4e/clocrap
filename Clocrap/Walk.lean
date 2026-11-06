@@ -4,6 +4,7 @@ import Clocrap.Vcs
 import Clocrap.Gitignore
 import Clocrap.Diff
 import Clocrap.Complexity
+import Clocrap.SwiftReader
 import Clocrap.LeanLang
 
 /-!
@@ -104,6 +105,15 @@ partial def walkRoot (root : String) (globalM : Option Gitignore.Matcher) : IO (
     return acc
   go root parents #[]
 
+/-- The functions that hold a changed line, or all of them outside diff mode. -/
+def changedOnly (change : Option Diff.FileChange) (functions : Array Function) : Array Function :=
+  match change with
+  | none => functions
+  | some c => functions.filter fun f => Id.run do
+    for line in [f.startLine:f.endLine + 1] do
+      if c.contains line then return true
+    return false
+
 /-- Counts one file, or returns `none` if it is not a recognised text file or, in diff mode, has no
 changed lines. -/
 def scanFile (path : String) (options : ScanOptions) : IO (Option FileReport) := do
@@ -141,15 +151,25 @@ def scanFile (path : String) (options : ScanOptions) : IO (Option FileReport) :=
   for h : n in [0:kinds.size] do
     if change.all (·.contains (n + 1)) then counts := counts.record kinds[n]
   if change.isSome && counts.total == 0 then return none
-  let mut functions := #[]
-  if options.functions then
-    functions := Complexity.functions language path source
-    if let some c := change then
-      functions := functions.filter fun f => Id.run do
-        for line in [f.startLine:f.endLine + 1] do
-          if c.contains line then return true
-        return false
-  return some { path, language, counts, functions }
+  let functions := if options.functions then Complexity.functions language path source else #[]
+  return some { path, language, counts, functions := changedOnly change functions }
+
+/-- Reports with their Swift functions filled in. Swift is read apart from the other languages, in
+one run of the Swift reader for all its files. -/
+def withSwiftFunctions (reports : Array FileReport) (options : ScanOptions) :
+    IO (Array FileReport) := do
+  let swift := reports.filter (·.language == .swift)
+  if !options.functions || swift.isEmpty then return reports
+  let some found ← SwiftReader.functions (swift.map (·.path)) | do
+    IO.eprintln "clocrap: no Swift toolchain found, so Swift functions are not scored"
+    return reports
+  let mut byPath : Std.HashMap String (Array Function) := {}
+  for h : k in [0:swift.size] do
+    let path := swift[k].path
+    let change := options.changed.bind (·.get path)
+    byPath := byPath.insert path (changedOnly change found[k]!)
+  return reports.map fun r =>
+    if r.language == .swift then { r with functions := byPath.getD r.path #[] } else r
 
 /-- Counts every recognised source file under every root.
 
@@ -195,6 +215,7 @@ def scan (roots : Array String) (options : ScanOptions) : IO (Array FileReport) 
     match ← IO.wait t with
     | .ok found => reports := reports ++ found
     | .error e => throw e
+  reports ← withSwiftFunctions reports options
   let keyed := reports.map fun r => (pathKey r.path, r)
   return (keyed.toList.mergeSort (fun a b => !(b.1 < a.1))).toArray.map (·.2)
 

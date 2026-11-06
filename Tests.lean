@@ -482,19 +482,6 @@ const g = (y: number) => y > 0 ? y : 0;
   { name := "TSX", path := "a.tsx",
     source := "const C = (p: { ok: boolean }) => p.ok ? <b /> : null;\n"
     expected := [("C", 2)] },
-  -- 1 base, `if` 1, `guard` 1, `&&` 1, `for` 1, switch with 3 entries = 2.
-  { name := "Swift decisions", path := "a.swift", source := "func f(a: Bool, b: Bool, xs: [Int], n: Int) -> Int {
-    if a && b { return 1 }
-    guard n > 0 else { return 0 }
-    for _ in xs {}
-    switch n {
-    case 1: return 1
-    case 2: return 2
-    default: return 3
-    }
-}
-"
-    expected := [("f", 7)] },
   -- 1 base, `if` 1, `&&` 1, `for` 1, two valued `case`s 2, `?:` 1.
   { name := "C decisions", path := "a.c", source := "static int *f(int a, int b) {
     if (a && b) return 0;
@@ -769,6 +756,128 @@ def supportedLanguages : IO Unit := do
   expect "Rust is supported" (Complexity.supports .rust "a.rs")
   expect "Kotlin is not" (!Complexity.supports .kotlin "a.kt")
 
+/-! ## Swift
+
+Swift goes through the compiler's parser as a separate program, so its cases run the way a user
+does: the built `clocrap` on a file in a fixture directory.
+-/
+
+/-- Each function clocrap reports for a Swift file: name, first line, last line and complexity. -/
+def swiftFunctions (dir : System.FilePath) (args : Array String := #[]) :
+    IO (List (String × Nat × Nat × Nat)) := do
+  let out ← clocrap dir (#["--walk", "--crap", "--json"] ++ args)
+  let rows := rowsAt (← stdoutJson out) ["functions", "functions"]
+  let found := rows.toList.map fun r =>
+    ((str r ["name"]).getD "?", (nat r ["line"]).getD 0, (nat r ["end_line"]).getD 0,
+      (nat r ["complexity"]).getD 0)
+  return found.mergeSort fun a b => a.2.1 ≤ b.2.1
+
+/-- A snippet, and each function's name, first line, last line and complexity. -/
+def swiftCases : List (String × String × List (String × Nat × Nat × Nat)) := [
+  -- 1 base, `if` 1, `guard` 1, `&&` 1, `for` 1, switch with 3 entries 2.
+  ("decisions", "func f(a: Bool, b: Bool, xs: [Int], n: Int) -> Int {
+    if a && b { return 1 }
+    guard n > 0 else { return 0 }
+    for _ in xs {}
+    switch n {
+    case 1: return 1
+    case 2: return 2
+    default: return 3
+    }
+}
+", [("f", 1, 10, 7)]),
+  -- 1 base, `?:` 1, `??` 1, `||` 1, the `if` inside the interpolation 1.
+  ("expressions", "func f(a: Bool, b: Int?) -> String {
+    let x = a ? 1 : 2
+    let y = b ?? x
+    return \"\\(a || y > 0) \\(if a { 1 } else { 2 })\"
+}
+", [("f", 1, 5, 5)]),
+  -- `repeat … while` is one, each `catch` is one, and `else if` is an `if`.
+  ("loops and catches", "func f(a: Bool) {
+    repeat {} while a
+    while a {}
+    do { try g() } catch is E {} catch {}
+    if a {} else if !a {}
+}
+", [("f", 1, 6, 7)]),
+  ("every `if case` counts", "func f(x: Int) {
+    if case 1 = x {}
+}
+", [("f", 1, 3, 2)]),
+  ("computed properties, accessors and subscripts", "final class C {
+    var a: Int { flag ? 1 : 2 }
+    var b: Int {
+        get { if flag { return 1 }; return 2 }
+        set { flag = newValue > 0 && flag }
+    }
+    var d = 0 {
+        didSet { if d > 0 {} }
+    }
+    subscript(i: Int) -> Int { i > 0 ? 1 : 2 }
+    deinit { if flag {} }
+}
+", [("a", 2, 2, 2), ("b.get", 4, 4, 2), ("b.set", 5, 5, 2), ("d.didSet", 8, 8, 2),
+    ("subscript", 10, 10, 2), ("deinit", 11, 11, 2)]),
+  ("a declaration starts at its attributes and modifiers", "struct S {
+    @available(iOS 17, *)
+    @MainActor
+    public static func f() {}
+
+    @inlinable public init() {}
+}
+", [("f", 2, 4, 1), ("init", 6, 6, 1)]),
+  ("declarations with no body are not functions", "protocol P {
+    init()
+    func f()
+    var v: Int { get set }
+    subscript(i: Int) -> Int { get }
+}
+", []),
+  ("a nested function is scored on its own, a closure is not", "func f(xs: [Int]) {
+    func g() { if true {} }
+    xs.forEach { x in if x > 0 {} }
+}
+", [("f", 1, 4, 2), ("g", 2, 2, 2)]),
+  ("both branches of a `#if` count, its condition does not", "#if DEBUG && os(iOS)
+func a() {}
+#elseif os(macOS) || os(Linux)
+func b() {}
+#else
+func c() {
+    #if DEBUG
+    if true {}
+    #else
+    while true {}
+    #endif
+}
+#endif
+", [("a", 2, 2, 1), ("b", 4, 4, 1), ("c", 6, 12, 3)]),
+  ("operators and keywords as names", "func && (a: Bool, b: Bool) -> Bool { false }
+func <=> (a: Int, b: Int) -> Bool { false }
+func g(for x: Int, if y: Int, while z: Int) { h(for: x).if.while() }
+", [("&&", 1, 1, 1), ("<=>", 2, 2, 1), ("g", 3, 3, 1)]) ]
+
+def swiftReadsChangedFunctionsOnly : IO Unit := do
+  let dir ← fixture
+  write (dir / "a.swift") "func f() {}\nfunc g() {}\n"
+  git dir #["init", "-q"]
+  git dir #["add", "."]
+  git dir #["commit", "-qm", "start"]
+  write (dir / "a.swift") "func f() {}\nfunc g() { if true {} }\n"
+  let out ← clocrap dir #["--crap", "--json", "--diff", "HEAD"]
+  let rows := rowsAt (← stdoutJson out) ["functions", "functions"]
+  expectEq "functions" (rows.toList.map (str · ["name"])) [some "g"]
+
+def swiftWithoutAToolchainIsSaid : IO Unit := do
+  let dir ← fixture
+  write (dir / "a.swift") "func f() {}\n"
+  let out ← IO.Process.output {
+    cmd := (← binary).toString, args := #["--walk", "--crap", "--json"], cwd := dir,
+    env := #[("PATH", some "/nonexistent")] }
+  expect s!"said so: {out.stderr}" (contains out.stderr "no Swift toolchain")
+  expectEq "functions" (rowsAt (← stdoutJson out) ["functions", "functions"]).size 0
+
 /-! ## Running -/
 
 def tests : List (String × IO Unit) :=
@@ -790,7 +899,13 @@ def tests : List (String × IO Unit) :=
     ("Lean symbols and spans", leanSymbolsAndSpans),
     ("Lean line kinds", leanLineKinds),
     ("Lean mangling", leanMangling),
-    ("supported languages", supportedLanguages) ] ++
+    ("supported languages", supportedLanguages),
+    ("Swift --diff keeps functions with a changed line", swiftReadsChangedFunctionsOnly),
+    ("Swift without a toolchain is said", swiftWithoutAToolchainIsSaid) ] ++
+  swiftCases.map (fun (name, source, expected) => (s!"Swift {name}", do
+    let dir ← fixture
+    write (dir / "a.swift") source
+    expectEq "functions" (← swiftFunctions dir) expected)) ++
   complexityCases.map (fun c => (c.name, do
     let got := (functionsIn c.path c.source).toList.map fun f => (f.name, f.complexity)
     expectEq "functions" got c.expected)) ++

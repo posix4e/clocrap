@@ -6,15 +6,15 @@ import Clocrap.Function
 
 One tokenizer for the languages whose functions clocrap finds from tokens (Lean has its own, in
 `Clocrap.LeanLang`). It knows each family's comments, strings and the code inside strings:
-template literals' `${…}`, Swift's `\(…)` and Python's f-string `{…}` are code, so a decision inside
-one counts, as it does in a parse. JavaScript's regular expression literals and JSX text are not
+template literals' `${…}` and Python's f-string `{…}` are code, so a decision inside one counts, as
+it does in a parse. JavaScript's regular expression literals and JSX text are not
 code, so a quote or an `if` inside them is not read as one.
 -/
 
 namespace Clocrap.Lex
 
 inductive Family where
-  | rust | swift | js | python | c
+  | rust | js | python | c
   deriving DecidableEq, Inhabited
 
 inductive Kind where
@@ -155,22 +155,6 @@ def stringAt (fam : Family) (s : ByteArray) (i : Nat) (prevWord : Bool) : Option
       return none
     if byteAt s j == 34 then return some ({ close := "\"".toUTF8 }, j + 1 - i)
     return none
-  | .swift =>
-    if prevWord then return none
-    let mut h := 0
-    while byteAt s (i + h) == 35 do h := h + 1
-    let hashes := ByteArray.mk (Array.replicate h 35)
-    let triple := hasAt s (i + h) "\"\"\"".toUTF8
-    if byteAt s (i + h) != 34 then return none
-    let quote := if triple then "\"\"\"".toUTF8 else "\"".toUTF8
-    -- With `#`s, escapes and interpolation take them too: `\#(x)`. Escapes are read with the
-    -- backslash rule only when there are none.
-    let kind : StrKind := {
-      close := quote ++ hashes
-      escapes := h == 0
-      interp := "\\".toUTF8 ++ hashes ++ "(".toUTF8
-      multiline := triple }
-    return some (kind, h + quote.size)
   | .js =>
     if b == 34 || b == 39 then
       return some ({ close := ByteArray.mk #[b], multiline := false }, 1)
@@ -303,7 +287,7 @@ partial def tokens (fam : Family) (s : ByteArray) (jsx : Bool := false) : Array 
   let lineComment := match fam with
     | .python => "#".toUTF8
     | _ => "//".toUTF8
-  let blockNests := fam == .rust || fam == .swift
+  let blockNests := fam == .rust
   while st.i < s.size do
     let i := st.i
     let b := byteAt s i
@@ -364,17 +348,12 @@ partial def tokens (fam : Family) (s : ByteArray) (jsx : Bool := false) : Array 
           (byteAt s j == 46 && isDigit (byteAt s (j + 1)))) do j := j + 1
       st := push { st with i := j } .num s i j
       continue
-    if isIdByte b || (fam == .swift && b == 35 && isAlpha (byteAt s (i + 1))) ||
-        (fam == .swift && b == 96) || (fam == .js && b == 35 && isIdByte (byteAt s (i + 1))) ||
+    if isIdByte b || (fam == .js && b == 35 && isIdByte (byteAt s (i + 1))) ||
         (fam == .c && b == 64 && isAlpha (byteAt s (i + 1))) then
       let mut j := i + 1
       -- Rust's raw names: `r#match`.
       if fam == .rust && b == 114 && byteAt s j == 35 && isIdByte (byteAt s (j + 1)) then j := j + 1
-      if b == 96 then
-        while j < s.size && byteAt s j != 96 && byteAt s j != 10 do j := j + 1
-        j := j + 1
-      else
-        while j < s.size && isIdByte (byteAt s j) do j := j + 1
+      while j < s.size && isIdByte (byteAt s j) do j := j + 1
       st := push { st with i := j } .ident s i j
       continue
     -- Closing brackets: a string's code part may end here.
