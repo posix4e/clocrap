@@ -89,7 +89,7 @@ def functionCells (s : Crap.Scored) (cwd : String) (hasCoverage : Bool) (thresho
     let over := if s.crap.any (· > threshold) then " OVER" else ""
     #[(s.crap.map (Num.fixed · 1)).getD "-", complexity,
       (s.coverage.map fun r => Num.fixed (r * 100.0) 0 ++ "%").getD "-", s.function.name,
-      location ++ over]
+      location ++ over ++ (if s.unused then " UNUSED" else "")]
 
 /-- Functions the table shows when none is over the threshold. -/
 def shownFunctions : Nat := 20
@@ -107,6 +107,9 @@ def functionNotes (ranking : Crap.Ranking) (threshold : Float) (hidden : Nat) : 
     out := out ++ s!"{ranking.noCode} Lean functions compiled to no code of their own (inlined, a type, or compile-time only), so have no coverage and were left out\n"
   if ranking.inlined > 0 then
     out := out ++ s!"{ranking.inlined} Lean functions were inlined into their callers and their own C never ran, so their coverage cannot be told and they were left out\n"
+  let unused : Nat := scored.foldl (fun n s => if s.unused then n + 1 else n) 0
+  if unused > 0 then
+    out := out ++ s!"{unused} Lean functions never ran and nothing that ran reaches them: dead code, or run only at compile time\n"
   let unlisted : Nat := scored.foldl (fun n s => if s.missingFromReport then n + 1 else n) 0
   if unlisted > 0 then
     out := out ++ s!"{unlisted} functions in files the coverage report does not list count as 0% covered\n"
@@ -144,7 +147,8 @@ def jsonFunctions (ranking : Crap.Ranking) (cwd : String) (threshold : Float) : 
     ("path", .str (displayPath s.path cwd)), ("name", .str s.function.name),
     ("line", .nat s.function.startLine), ("end_line", .nat s.function.endLine),
     ("complexity", .nat s.function.complexity), ("coverage", .option .float s.coverage),
-    ("crap", .option .float s.crap), ("missing_from_report", .bool s.missingFromReport)]
+    ("crap", .option .float s.crap), ("missing_from_report", .bool s.missingFromReport),
+    ("unused", .bool s.unused)]
   .obj #[("threshold", .float threshold),
     ("over_threshold", .nat (Crap.overThreshold ranking.functions threshold)),
     ("no_code", .nat ranking.noCode), ("inlined", .nat ranking.inlined),

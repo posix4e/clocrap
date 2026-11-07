@@ -43,6 +43,8 @@ structure Scored where
   /-- Whether the coverage data has a record for the file. When it does not, `coverage` is 0: the
   file is counted as untested. -/
   missingFromReport : Bool
+  /-- Lean only: it never ran, and nothing that ran reaches it. -/
+  unused : Bool := false
   deriving Inhabited
 
 /-- The functions of a scan, worst first, and how many could not be scored. -/
@@ -64,6 +66,8 @@ inductive Found where
   | noCode
   /-- Lean only: the function ran, if at all, inlined into its callers. -/
   | inlined
+  /-- Lean only: the function never ran, and nothing that ran reaches it. -/
+  | unused
 
 /-- Worst first: by CRAP score when both have one, else by complexity; then by path and line. -/
 def order (a b : Scored) : Ordering :=
@@ -100,11 +104,13 @@ def rank (reports : Array FileReport) (coverage : Option Coverage) : IO Ranking 
       let function := report.functions[index]
       let mut cov : Option Float := none
       let mut missing := false
+      let mut unused := false
       if let some data := coverage then
         let found := match lean with
           | some (some perFunction) => match perFunction[index]! with
             | some (.ratio r) => Found.ratio r
             | some .inlined => .inlined
+            | some .unused => .unused
             | none => .noCode
           | some none => .unlisted
           | none => match data.ratio key function.startLine function.endLine with
@@ -112,6 +118,9 @@ def rank (reports : Array FileReport) (coverage : Option Coverage) : IO Ranking 
             | none => .unlisted
         match found with
         | .ratio r => cov := some r
+        | .unused =>
+          cov := some 0.0
+          unused := true
         | .unlisted =>
           cov := some 0.0
           missing := true
@@ -123,7 +132,7 @@ def rank (reports : Array FileReport) (coverage : Option Coverage) : IO Ranking 
           continue
       scored := scored.push {
         path := report.path, function, coverage := cov,
-        crap := cov.map (score function.complexity ·), missingFromReport := missing }
+        crap := cov.map (score function.complexity ·), missingFromReport := missing, unused }
   let sorted := scored.toList.mergeSort (fun a b => order a b != .gt) |>.toArray
   return { functions := sorted, noCode, inlined }
 

@@ -417,6 +417,113 @@ end Cov
     (contains table "2 Lean functions were inlined into their callers")
   IO.FS.removeDirAll dir
 
+/-- Each way C can use a declaration, and each way it can seem not to. `run` is the only function
+that ran. The C is written by hand, in the shape Lean writes it; the `.olean` is compiled for real,
+since what the source uses after elaboration is the point. -/
+def silentFixture : IO System.FilePath := do
+  let dir ← fixture
+  write (dir / "lean-toolchain") (← IO.FS.readFile "lean-toolchain")
+  write (dir / "Cov/Basic.lean") "namespace Cov
+structure T where
+  n : Nat
+def eqT (a b : T) : Bool := a.n == b.n
+instance : BEq T := ⟨eqT⟩
+def direct (n : Nat) : Nat := n + 1
+def byClosure (n : Nat) : Nat := n + 2
+def byStatic (n : Nat) : Nat := n + 3
+def byClosedTerm (n : Nat) : Nat := n + 4
+def inlinedAway (n : Nat) : Nat := n + 5
+def ownPartsOnly (n : Nat) : Nat := n + 6
+private def hidden (n : Nat) : Nat := n + 7
+def dead (n : Nat) : Nat := n + 8
+def provedOnly (n : Nat) : Nat := n + 9
+theorem provedOnly_eq : provedOnly 0 = 9 := rfl
+def run (a : T) : Nat := if a == a then inlinedAway 1 + ownPartsOnly 2 + hidden 3 else 0
+end Cov
+"
+  let lean := dir / ".lake/build/lib/lean/Cov/Basic.olean"
+  IO.FS.createDirAll (lean.parent.getD ".")
+  let compiled ← IO.Process.output {
+    cmd := "lean", args := #["-o", lean.toString, "Cov/Basic.lean"], cwd := some dir }
+  unless compiled.exitCode == 0 do fail s!"lean: {compiled.stdout}{compiled.stderr}"
+  let silent := ["direct", "byClosure", "byStatic", "byClosedTerm", "inlinedAway", "ownPartsOnly",
+    "eqT", "dead", "provedOnly"]
+  let names := (silent.map ("lp_pkg_Cov_" ++ ·)) ++ ["lp_pkg___private_Cov_Basic_0__Cov_hidden",
+    "lp_pkg_Cov_ownPartsOnly___lam__0", "lp_pkg_Cov_ownPartsOnly___boxed",
+    "_init_lp_pkg_Cov_table___closed__0"]
+  let functions := names.zipIdx.map fun (name, k) => (name, 100 + 10 * k)
+  let lines := functions.foldl (init := Array.replicate 400 "") fun lines (name, line) =>
+    lines.set! (line - 1) s!"static lean_object* {name}(lean_object* x_1)\{"
+  let body (name text : String) (lines : Array String) : Array String :=
+    match functions.find? (·.1 == name) with
+    | some (_, line) => lines.set! line text
+    | none => lines
+  let lines := lines
+    |>.set! 0 "LEAN_EXPORT lean_object* lp_pkg_Cov_dead(lean_object*);"
+    |>.set! 1 "static const lean_closure_object lp_pkg_Cov_run___closed__0_value = {.m_fun = (void*)lp_pkg_Cov_byStatic___boxed, .m_arity = 1};"
+    |>.set! 2 "static const lean_object* lp_pkg_Cov_dead___closed__0 = (const lean_object*)&lp_pkg_Cov_dead___closed__0_value;"
+    |>.set! 49 "lean_object* lp_pkg_Cov_run(lean_object* x_1){"
+    |>.set! 50 "x_2 = lp_pkg_Cov_direct(x_1);"
+    |>.set! 51 "x_3 = lean_alloc_closure((void*)(lp_pkg_Cov_byClosure___boxed), 1, 0);"
+    |>.set! 299 "void initialize_pkg_Cov_Basic(void){"
+    |>.set! 300 "lp_pkg_Cov_dead = _init_lp_pkg_Cov_dead();"
+    |> body "_init_lp_pkg_Cov_table___closed__0" "x_2 = lp_pkg_Cov_byClosedTerm(x_1);"
+    |> body "lp_pkg_Cov_ownPartsOnly___lam__0" "x_2 = lp_pkg_Cov_ownPartsOnly(x_1);"
+    |> body "lp_pkg_Cov_ownPartsOnly___boxed" "x_2 = lp_pkg_Cov_ownPartsOnly(x_1);"
+    |> body "lp_pkg_Cov_dead" "x_2 = lp_pkg_Cov_dead(x_1);"
+  let cFile := dir / ".lake/build/ir/Cov/Basic.c"
+  write cFile ("\n".intercalate lines.toList ++ "\n")
+  let all := functions ++ [("lp_pkg_Cov_run", 50), ("initialize_pkg_Cov_Basic", 300)]
+  let record := all.foldl (init := "") fun out (name, line) => out ++ s!"FN:{line},{name}\n"
+  let counts := all.foldl (init := "") fun out (name, _) =>
+    let calls := if name == "lp_pkg_Cov_run" then 1 else 0
+    out ++ s!"FNDA:{calls},{name}\n"
+  let hits := all.foldl (init := "") fun out (name, line) =>
+    let calls := if name == "lp_pkg_Cov_run" then 1 else 0
+    out ++ s!"DA:{line},{calls}\n"
+  write (dir / "lcov.info") (s!"SF:{← IO.FS.realPath cFile}\n" ++ record ++ counts ++ hits ++
+    "end_of_record\n")
+  return dir
+
+/-- The functions of a report by name, with their coverage and whether they are unused. -/
+def silentRows (json : Lean.Json) : List (String × Option Float × Bool) :=
+  let rows := (rowsAt json ["functions", "functions"]).toList.filter fun r =>
+    (str r ["path"]).any (·.endsWith ".lean")
+  let found := rows.map fun r =>
+    ((str r ["name"]).getD "?", num r ["coverage"],
+      (Lean.Json.at r ["unused"]).getBool?.toOption.getD false)
+  found.mergeSort fun a b => a.1 ≤ b.1
+
+def leanSilentDeclarations : IO Unit := do
+  let dir ← silentFixture
+  let json ← stdoutJson (← clocrap dir #["--json", "--lcov", "lcov.info", "Cov"])
+  -- A call site, however it is written, makes a 0 real; `dead`'s only mentions are its own, and a
+  -- theorem runs nothing, so `provedOnly` is unused too. `run` ran.
+  expectEq "functions" (silentRows json)
+    [("byClosedTerm", some 0.0, false), ("byClosure", some 0.0, false),
+     ("byStatic", some 0.0, false), ("dead", some 0.0, true), ("direct", some 0.0, false),
+     ("provedOnly", some 0.0, true), ("run", some 1.0, false)]
+  -- `inlinedAway` and `hidden` are named by `run`, `eqT` is only reached through `a == a`, and
+  -- `ownPartsOnly` is mentioned by nothing but its parts.
+  expectEq "inlined" (nat json ["functions", "inlined"]) (some 4)
+  let table := (← clocrap dir #["--lcov", "lcov.info", "Cov"]).stdout
+  expect s!"the table marks them: {table}" (contains table "UNUSED")
+  expect s!"and says how many: {table}"
+    (contains table "2 Lean functions never ran and nothing that ran reaches them")
+  IO.FS.removeDirAll dir
+
+def leanSilentWithoutCompiledModules : IO Unit := do
+  let dir ← silentFixture
+  let out ← IO.Process.output {
+    cmd := (← binary).toString, args := #["--json", "--lcov", "lcov.info", "Cov"], cwd := dir,
+    env := #[("PATH", some "/nonexistent")] }
+  expect s!"said so: {out.stderr}" (contains out.stderr "could not read")
+  -- Nothing can be called unused or inlined now, so they stay as never run.
+  let rows := silentRows (← stdoutJson out)
+  expect s!"none is unused: {reprStr rows}" (rows.all fun (_, _, unused) => !unused)
+  expectEq "inlined" (nat (← stdoutJson out) ["functions", "inlined"]) (some 0)
+  IO.FS.removeDirAll dir
+
 /-! ## Analyzers -/
 
 /-- A snippet in a file of this name, and each function's name and complexity in line order. -/
@@ -941,6 +1048,8 @@ def tests : List (String × IO Unit) :=
     ("Lean coverage comes from its C", leanCoverageComesFromItsC),
     ("Lean specialised copies belong to the callee", leanSpecialisedCopiesBelongToTheCallee),
     ("Lean inlined declarations are shown apart", leanInlinedDeclarationsAreShownApart),
+    ("Lean declarations nothing calls are told apart", leanSilentDeclarations),
+    ("Lean without its compiled modules stays never run", leanSilentWithoutCompiledModules),
     ("Lean symbols and spans", leanSymbolsAndSpans),
     ("Lean line kinds", leanLineKinds),
     ("Lean mangling", leanMangling),
