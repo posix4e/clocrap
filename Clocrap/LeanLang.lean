@@ -24,8 +24,9 @@ files. The shape clocrap needs is regular, though:
 A function's complexity is 1 plus one for each `if` (so each `else if`), `unless`, `for`, `while`,
 `repeat`, `catch`, `&&`, `||`, `∧`, `∨`, `<|>` and `|`, less one for each `match`, each `fun` that
 matches on alternatives, and a definition by pattern matching. So n arms add n − 1, and a `do`
-block's `let some x := e | fallback` adds one. A `termination_by` or `decreasing_by` clause is a
-proof, and adds nothing.
+block's `let some x := e | fallback` adds one. An or-pattern, `| a | b => x`, is one arm, as it is
+in Rust and in a Swift `case a, b:`. A `termination_by` or `decreasing_by` clause is a proof, and
+adds nothing.
 -/
 
 namespace Clocrap.LeanLang
@@ -333,17 +334,29 @@ def anonymousInstance (ts : Array Token) (scope : Array String) : String × Stri
   let name := if name.length > 48 then name.takeS 47 ++ "…" else name
   (name, qualified scope generated)
 
+/-- Tokens that end a pattern, so the `|` after one starts something new rather than continuing an
+or-pattern. An arm ends at `=>`, and a `let … | fallback` has no `=>`, but what follows one needs a
+`let`, `:=`, `with`, `fun` or `λ` before it can reach another `|`. -/
+def endsPattern : Array String := #["=>", ":=", "with", "let", "fun", "λ"]
+
 /-- 1 plus the decision points in `ts`, before any proof clause. -/
 def complexity (ts : Array Token) : Int := Id.run do
   let mut total : Int := 1
+  -- Whether a `|` has been seen with nothing since that ends its pattern.
+  let mut inPattern := false
   for h : i in [0:ts.size] do
     let t := ts[i]
     if t.kind == .literal then continue
+    if endsPattern.contains t.text then inPattern := false
     match t.text with
     | "termination_by" | "decreasing_by" => break
     | "if" | "unless" | "for" | "while" | "repeat" | "catch" =>
       if t.kind == .ident then total := total + 1
-    | "&&" | "||" | "∧" | "∨" | "<|>" | "|" =>
+    | "|" =>
+      if t.kind == .symbol then
+        if !inPattern then total := total + 1
+        inPattern := true
+    | "&&" | "||" | "∧" | "∨" | "<|>" =>
       if t.kind == .symbol then total := total + 1
     | "match" => if t.kind == .ident then total := total - 1
     | "fun" | "λ" => if (ts[i + 1]?.map (·.is "|")).getD false then total := total - 1

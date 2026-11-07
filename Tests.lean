@@ -773,6 +773,36 @@ def leanCases : List (String × String × List (String × Nat)) := [
   | 1 => 2
   | _ => 3
 ", [("f", 3)]),
+  ("an or-pattern is one arm", "def f (n : Nat) : Nat :=
+  match n with
+  | 0 | 1 => 1
+  | 2 | 3
+  | 4 => 2
+  | _ => 3
+
+def g : Nat → Nat
+  | 0 | 1 => 1
+  | _ => 2
+
+def h (xs : List Nat) : List Nat :=
+  xs.map fun
+    | 0 | 1 => 1
+    | _ => 2
+
+def i (a b : Nat) : Nat :=
+  match a, b with
+  | 0, 0 | 1, 1 => 1
+  | _, _ => 2
+", [("f", 3), ("g", 2), ("h", 2), ("i", 2)]),
+  -- A fallback has no `=>`, so what follows it must not read as more of its pattern.
+  ("a fallback, then arms", "def f (a b : Option Nat) : IO Nat := do
+  let some x := a | pure 0
+  let some y := b | pure 1
+  match x with
+  | 0 => pure 2
+  | 1 | 2 => pure y
+  | _ => pure 3
+", [("f", 5)]),
   ("pattern-matching definitions and lambdas", "def f : Nat → Nat
   | 0 => 1
   | 1 => 2
