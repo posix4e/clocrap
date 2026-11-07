@@ -9,7 +9,7 @@ lines a change added.
 
 ```text
 $ cargo llvm-cov --locked -p rescue-core --lcov --output-path lcov.info
-$ clocrap --crap --lcov lcov.info crates/rescue-core
+$ clocrap --lcov lcov.info crates/rescue-core
 Language    files    blank  comment     code
 --------------------------------------------
 Rust           23      376      548     4388
@@ -23,7 +23,6 @@ CRAP  complexity  coverage  function             location
 12.0          12      100%  parse_path           crates/rescue-core/src/paths.rs:370
 
 0 of 93 functions above the CRAP threshold of 30
-142 functions in files the coverage report does not list were left out; --count-unlisted scores them as untested
 ```
 
 ## Install
@@ -45,16 +44,22 @@ seconds, and keeps it in `~/.cache/clocrap`. Without a toolchain, clocrap says s
 on stderr and scores everything else. It has only been tried with Xcode's
 toolchain on macOS.
 
-## Counting lines
+## Usage
+
+Every run counts lines and scores functions:
 
 ```bash
-clocrap                      # the current directory, as a table
+clocrap                      # the current directory
 clocrap src tests            # several roots
-clocrap --by-file            # a row per file as well
-clocrap --walk               # every file under the paths, tracked or not
-clocrap --json               # machine-readable, for scripts
+clocrap --json               # every file and function, for scripts
 clocrap --diff origin/main   # only the lines added or changed against a ref
+clocrap --lcov lcov.info     # CRAP scores from coverage
 ```
+
+The table lists the 20 worst functions, and every function above the threshold.
+`--json` lists them all, with a row per file.
+
+## Counting lines
 
 Counts are by language, detected from the file extension:
 
@@ -104,12 +109,8 @@ other ignored files never count. Hidden files that git lists, such as
 working tree, a symlink and a submodule are not. The count reads the working
 tree, not the index. A file named explicitly that git ignores is skipped.
 
-A path that is not inside a git repository, or a machine without git, falls
-back to `--walk`.
-
-`--walk` finds files by walking the directories instead. It skips hidden files
-and directories and honours `.gitignore` even outside a git repository, so it
-also counts tracked files that `.gitignore` excludes and misses hidden ones.
+A path that is not inside a git repository, or a machine without git, is walked
+instead. A walk skips hidden files and directories and honours `.gitignore`.
 
 Either way, files with an unknown extension, files with no extension whose
 first line names no supported language, and files with a NUL byte in their
@@ -118,8 +119,7 @@ first 8 KB, are not counted.
 `--diff <REF>` runs `git diff -U0 <REF>` in each repository the roots belong
 to. It counts only the added and changed lines in the working tree. A file with
 no changed lines is left out. An untracked file that git does not ignore counts
-in full. With `--crap`, only the functions that contain a changed line are
-listed.
+in full. Only the functions that contain a changed line are listed.
 
 ## CRAP
 
@@ -158,18 +158,19 @@ function's span (its first to its last line) that ran, divided by the
 instrumented lines in that span. A function with no instrumented lines counts as
 0% covered.
 
-A file the lcov report does not list is usually one the report leaves out on
-purpose, such as test code. Its functions are left out of the CRAP table, and
-the report says how many. `--count-unlisted` scores them as 0% covered instead.
+A file the lcov report does not list has not been shown to run, so its functions
+count as 0% covered, and the report says how many. That includes test code a
+report leaves out on purpose: name the paths the report covers to leave it out
+of the scan.
 
 Without `--lcov` there is no coverage, so no CRAP score. The tool then lists
-complexity only. `--crap` alone does this.
+complexity only.
 
 Get an lcov file for Rust from `cargo-llvm-cov`:
 
 ```bash
 cargo llvm-cov --locked --lcov --output-path lcov.info
-clocrap --crap --lcov lcov.info
+clocrap --lcov lcov.info
 ```
 
 Functions are found for Rust, Python, TypeScript, TSX, JavaScript, C,
@@ -284,23 +285,28 @@ line, so the gate checks what a change touched.
 
 ## Speed
 
-On an Apple M5 Max, counting 100,000 files (50,000 Rust and 50,000 Python,
-4.35 million lines) takes about 1.7 seconds, wall clock, with `--threads 4`,
-the default. The Rust version took 1.2 seconds on the same tree.
+Every run reads each function, so the time depends on how much code there is.
+On an Apple M5 Max, a whole run takes about 0.2 seconds on a repository of 3,000
+functions (Swift or Lean).
 
-The time goes to the kernel. Plain `cat` over the same files, run in parallel,
-has the same curve: real time stops falling at four or so readers, while system
-time keeps rising. File opens contend in macOS past that point. So the default
-is four workers, and `--threads` changes it.
+The worst case is a tree of nothing but code. On 100,000 distinct files
+(50,000 Rust and 50,000 Python, 6.25 million code lines, 250,000 functions),
+best of three runs, against tools that only count lines:
 
-Against the other two tools, on the same 100,000-file tree (each file with
-different content), best of three runs, `--threads 4` for clocrap:
+| Tool            | Wall clock | Code lines |
+|-----------------|-----------:|-----------:|
+| clocrap         |    10.9 s  |  6,250,000 |
+| counting alone  |     1.76 s |  6,250,000 |
+| tokei           |     1.31 s |  6,250,000 |
+| cloc            |    22.7 s  |  6,250,000 |
 
-| Tool      | Wall clock | Code lines |
-|-----------|-----------:|-----------:|
-| clocrap   |     1.66 s |  2,300,000 |
-| tokei 15  |     1.29 s |  2,300,000 |
-| cloc 2.10 |    18.3 s  |  2,250,000 |
+"Counting alone" is clocrap before every run scored functions, and it shows what
+scoring costs. The tree has no Swift. A scan with Swift files adds a run of the
+reader, and a Swift toolchain must be installed for Swift to be scored.
+
+Files are read by four workers. Past that, file opens contend in macOS: real time
+stops falling while system time keeps rising, and plain `cat` run in parallel
+over the same files has the same curve.
 
 `scripts/bench.py [DIR]` runs the comparison on any directory. cloc skips files
 whose contents are identical to an earlier file, so a benchmark tree must have

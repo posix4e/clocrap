@@ -112,7 +112,7 @@ def totalLinesAgreeWithWc : IO Unit := do
   write (dir / "web/app.ts") "// top\nconst a = 1; /* c */\n\n"
   let files : List String := ["src/lib.rs", "README.md", "tool/run.py", "Cargo.toml", "web/app.ts"]
   let expected ← files.foldlM (fun n f => return n + (← wcLines (dir / System.FilePath.mk f))) 0
-  let out ← clocrap dir #["--json", "--by-file"]
+  let out ← clocrap dir #["--json"]
   expectEq "exit status" out.exitCode 0
   let json ← stdoutJson out
   let counted := (nat json ["total", "blank"]).getD 0 + (nat json ["total", "comment"]).getD 0 +
@@ -209,7 +209,7 @@ def thresholdGateExitsOneOnlyAboveIt : IO Unit := do
 def withoutCoverageComplexityOnlyAndNeverGates : IO Unit := do
   let dir ← fixture
   write (dir / "src/lib.rs") libRs
-  let out ← clocrap dir #["--crap", "--threshold", "1"]
+  let out ← clocrap dir #["--threshold", "1"]
   expectEq "exit status" out.exitCode 0
   expect s!"complexity only in {out.stdout}" (contains out.stdout "complexity only")
   expect s!"f at src/lib.rs:4 in {out.stdout}" <| (out.stdout.splitOn "\n").any fun line =>
@@ -225,7 +225,7 @@ def diffCountsAddedLinesAndUntrackedFiles : IO Unit := do
   -- One new code line in a tracked file, and a new untracked file of two lines.
   write (dir / "src/lib.rs") (libRs ++ "fn g() {}\n")
   write (dir / "new.rs") "fn n() {}\n\n"
-  let json ← stdoutJson (← clocrap dir #["--diff", "HEAD", "--json", "--by-file"])
+  let json ← stdoutJson (← clocrap dir #["--diff", "HEAD", "--json"])
   expectEq "files" (nat json ["total", "files"]) (some 2)
   expectEq "code" (nat json ["total", "code"]) (some 2)
   expectEq "blank" (nat json ["total", "blank"]) (some 1)
@@ -239,7 +239,7 @@ def diffAgainstAnUnknownRefIsAnError : IO Unit := do
   expectEq "exit status" (← clocrap dir #["--diff", "no-such-ref"]).exitCode 2
   IO.FS.removeDirAll dir
 
-def countsTheFilesGitListsUnlessWalking : IO Unit := do
+def countsTheFilesGitLists : IO Unit := do
   let dir ← fixture
   git dir #["init", "-q"]
   write (dir / ".gitignore") "ignored.rs\n"
@@ -251,12 +251,53 @@ def countsTheFilesGitListsUnlessWalking : IO Unit := do
   -- Tracked, hidden but tracked, and untracked but not ignored.
   let byGit ← stdoutJson (← clocrap dir #["--json"])
   expectEq "files git lists" (nat byGit ["total", "files"]) (some 3)
-  -- A walk skips the hidden directory.
-  let walked ← stdoutJson (← clocrap dir #["--json", "--walk"])
-  expectEq "files walked" (nat walked ["total", "files"]) (some 2)
   IO.FS.removeDirAll dir
 
-def diffWithCrapKeepsChangedFunctions : IO Unit := do
+def outsideGitTheDirectoriesAreWalked : IO Unit := do
+  let dir ← fixture
+  write (dir / ".gitignore") "ignored.rs\n"
+  write (dir / "kept.rs") "fn k() {}\n"
+  write (dir / ".hidden/h.rs") "fn h() {}\n"
+  write (dir / "ignored.rs") "fn i() {}\n"
+  let walked ← stdoutJson (← clocrap dir #["--json"])
+  expectEq "files walked" (nat walked ["total", "files"]) (some 1)
+  IO.FS.removeDirAll dir
+
+/-- A Rust file of `n` functions, each of complexity 6, so untested each scores 42. -/
+def manyFunctions (n : Nat) : String :=
+  String.join ((List.range n).map fun k =>
+    s!"fn f{k}(a: bool) \{\n" ++
+      String.join (List.replicate 5 "    if a { return; }\n") ++ "}\n")
+
+def tableShowsTheWorstAndJsonEveryFunction : IO Unit := do
+  let dir ← fixture
+  write (dir / "a.rs") (manyFunctions 25)
+  let out ← clocrap dir #[]
+  expect s!"the rest said in {out.stdout}" (contains out.stdout "5 more functions")
+  expectEq "rows" ((out.stdout.splitOn "a.rs:").length - 1) 20
+  let json ← stdoutJson (← clocrap dir #["--json"])
+  expectEq "functions" (rowsAt json ["functions", "functions"]).size 25
+  expectEq "files" (str json ["files", "0", "path"]) (some "a.rs")
+  IO.FS.removeDirAll dir
+
+def filesTheReportOmitsCountAsUntested : IO Unit := do
+  let dir ← fixture
+  write (dir / "a.rs") (manyFunctions 25)
+  write (dir / "lcov.info") "SF:elsewhere.rs\nDA:1,1\nend_of_record\n"
+  let out ← clocrap dir #["--lcov", "lcov.info"]
+  expectEq "exit status" out.exitCode 1
+  -- All of them are over the threshold, so the table cuts none.
+  expectEq "rows" ((out.stdout.splitOn "OVER").length - 1) 25
+  expect s!"said in {out.stdout}" (contains out.stdout "25 functions in files the coverage report does not list count as 0% covered")
+  IO.FS.removeDirAll dir
+
+def removedOptionsAreRefused : IO Unit := do
+  let dir ← fixture
+  for flag in ["--crap", "--by-file", "--walk", "--count-unlisted", "--threads=2"] do
+    expectEq flag (← clocrap dir #[flag]).exitCode 2
+  IO.FS.removeDirAll dir
+
+def diffKeepsChangedFunctions : IO Unit := do
   let dir ← fixture
   write (dir / "src/lib.rs") libRs
   git dir #["init", "-q"]
@@ -265,7 +306,7 @@ def diffWithCrapKeepsChangedFunctions : IO Unit := do
   -- A new function after `f`; `f` itself is untouched.
   write (dir / "src/lib.rs")
     (libRs ++ "\npub fn g(y: u32) -> u32 {\n    if y > 0 { y } else { 0 }\n}\n")
-  let json ← stdoutJson (← clocrap dir #["--diff", "HEAD", "--crap", "--json"])
+  let json ← stdoutJson (← clocrap dir #["--diff", "HEAD", "--json"])
   expectEq "functions" ((rowsAt json ["functions", "functions"]).toList.map (str · ["name"]))
     [some "g"]
   IO.FS.removeDirAll dir
@@ -765,7 +806,7 @@ does: the built `clocrap` on a file in a fixture directory.
 /-- Each function clocrap reports for a Swift file: name, first line, last line and complexity. -/
 def swiftFunctions (dir : System.FilePath) (args : Array String := #[]) :
     IO (List (String × Nat × Nat × Nat)) := do
-  let out ← clocrap dir (#["--walk", "--crap", "--json"] ++ args)
+  let out ← clocrap dir (#["--json"] ++ args)
   let rows := rowsAt (← stdoutJson out) ["functions", "functions"]
   let found := rows.toList.map fun r =>
     ((str r ["name"]).getD "?", (nat r ["line"]).getD 0, (nat r ["end_line"]).getD 0,
@@ -865,7 +906,7 @@ def swiftReadsChangedFunctionsOnly : IO Unit := do
   git dir #["add", "."]
   git dir #["commit", "-qm", "start"]
   write (dir / "a.swift") "func f() {}\nfunc g() { if true {} }\n"
-  let out ← clocrap dir #["--crap", "--json", "--diff", "HEAD"]
+  let out ← clocrap dir #["--json", "--diff", "HEAD"]
   let rows := rowsAt (← stdoutJson out) ["functions", "functions"]
   expectEq "functions" (rows.toList.map (str · ["name"])) [some "g"]
 
@@ -873,7 +914,7 @@ def swiftWithoutAToolchainIsSaid : IO Unit := do
   let dir ← fixture
   write (dir / "a.swift") "func f() {}\n"
   let out ← IO.Process.output {
-    cmd := (← binary).toString, args := #["--walk", "--crap", "--json"], cwd := dir,
+    cmd := (← binary).toString, args := #["--json"], cwd := dir,
     env := #[("PATH", some "/nonexistent")] }
   expect s!"said so: {out.stderr}" (contains out.stderr "no Swift toolchain")
   expectEq "functions" (rowsAt (← stdoutJson out) ["functions", "functions"]).size 0
@@ -891,8 +932,12 @@ def tests : List (String × IO Unit) :=
     ("without coverage: complexity only, never gates", withoutCoverageComplexityOnlyAndNeverGates),
     ("--diff counts added lines and untracked files", diffCountsAddedLinesAndUntrackedFiles),
     ("--diff against an unknown ref is an error", diffAgainstAnUnknownRefIsAnError),
-    ("counts the files git lists unless walking", countsTheFilesGitListsUnlessWalking),
-    ("--diff --crap keeps functions with a changed line", diffWithCrapKeepsChangedFunctions),
+    ("counts the files git lists", countsTheFilesGitLists),
+    ("--diff keeps functions with a changed line", diffKeepsChangedFunctions),
+    ("outside git the directories are walked", outsideGitTheDirectoriesAreWalked),
+    ("the table shows the worst, JSON every function", tableShowsTheWorstAndJsonEveryFunction),
+    ("files the report omits count as untested", filesTheReportOmitsCountAsUntested),
+    ("removed options are refused", removedOptionsAreRefused),
     ("Lean coverage comes from its C", leanCoverageComesFromItsC),
     ("Lean specialised copies belong to the callee", leanSpecialisedCopiesBelongToTheCallee),
     ("Lean inlined declarations are shown apart", leanInlinedDeclarationsAreShownApart),
