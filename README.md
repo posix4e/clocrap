@@ -147,8 +147,9 @@ Complexity is 1 plus one for each decision point in the function's body:
 - Lean: `if` (so each `else if`), `unless`, `for`, `while`, `repeat`, `catch`,
   `&&`, `||`, `∧`, `∨`, `<|>`, and each `|` alternative beyond the first of a
   `match`, a `fun` or a definition by pattern matching. A `do` block's
-  `let some x := e | fallback` is one. A `termination_by` or `decreasing_by`
-  clause is a proof and adds nothing.
+  `let some x := e | fallback` is one. An or-pattern, `| a | b => x`, is one
+  alternative. A `termination_by` or `decreasing_by` clause is a proof and adds
+  nothing.
 
 Closures and lambdas count toward the function they sit in. A nested function
 is scored on its own. The `?` operator, `try` and `else` are not decision points.
