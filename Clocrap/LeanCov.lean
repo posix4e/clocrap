@@ -2,6 +2,7 @@ import Clocrap.Bytes
 import Clocrap.Function
 import Clocrap.Lcov
 import Clocrap.LeanLang
+import Clocrap.LeanRefs
 
 /-!
 # Coverage for Lean
@@ -34,9 +35,20 @@ cases are told apart:
 
 - A generic declaration whose own body was never called but whose specialised copies were: only
   the copies count, since the generic body is a template the compiled program does not use.
-- A declaration the compiler may inline (see `Symbol.inline`) whose own C was never called and that
-  has no copies: its code ran, if at all, inside its callers' C, where it cannot be told apart. It
-  is `inlined`, with no coverage, rather than untested.
+
+A declaration none of whose C was ever called takes more to read, since it may have run inside its
+callers' C, where it cannot be told apart. So the C is searched for the places that use it:
+
+- Any other function's C mentions it, whether a direct call, a closure, a `___boxed` wrapper or a
+  closed term in `_init_…`: the call site exists and its count is 0, so it really never ran.
+- No C mentions it, and something that ran reaches it through the declarations (see
+  `Clocrap.LeanRefs`): its body was inlined. It is `inlined`, with no coverage, rather than untested.
+- No C mentions it, and nothing that ran reaches it: it is `unused`, scored as never run and marked,
+  as it is dead code, or runs only at compile time.
+
+A declaration's own parts do not count as using it, and neither does a copy of something else
+specialised for it. Without the C or the compiled modules to read, a declaration the compiler may
+inline (see `Symbol.inline`) with no copies is taken to be `inlined`.
 -/
 
 namespace Clocrap.LeanCov
@@ -136,7 +148,17 @@ inductive Measure where
   | ratio (r : Float)
   /-- Inlined into its callers, and its own C never ran: its coverage cannot be told. -/
   | inlined
+  /-- Never ran, and nothing that ran reaches it. -/
+  | unused
   deriving Inhabited, BEq, Repr
+
+/-- Where a declaration whose C was never called stands. -/
+inductive Silent where
+  /-- Some other C mentions it, so its count of 0 is real. -/
+  | hasCallSite
+  | inlined
+  | unused
+  deriving Inhabited, BEq
 
 /-- The instrumented C lines of some functions, how many of them ran, and the calls to them. -/
 structure Tally where
@@ -159,11 +181,15 @@ structure Owned where
   copies : Std.HashMap String Tally := {}
   deriving Inhabited
 
+/-- Whether a call to any of the declaration's C was ever counted. -/
+def Owned.neverCalled (o : Owned) : Bool :=
+  (o.own.all (·.calls == 0)) && o.copies.fold (init := true) fun none _ t => none && t.calls == 0
+
 /-- The measure of a declaration from what it owns: `none` when it owns no C. `counted` is whether
 the report counts calls for its module's C. With counts, a copy that was never called is left out
 when another was: each copy is the same source, and an unused one shows only that its caller did
-not run. -/
-def Owned.measure (o : Owned) (counted inline : Bool) : Option Measure :=
+not run. `silent` says where a declaration that was never called stands, when that could be read. -/
+def Owned.measure (o : Owned) (counted inline : Bool) (silent : Option Silent) : Option Measure :=
   if o.own.isNone && o.copies.isEmpty then none
   else
     let own := o.own.getD {}
@@ -171,13 +197,114 @@ def Owned.measure (o : Owned) (counted inline : Bool) : Option Measure :=
     let called := o.copies.fold (init := ({} : Tally)) fun acc _ t =>
       if t.calls > 0 then acc.plus t else acc
     if counted && own.calls == 0 && called.calls > 0 then some (.ratio called.ratio)
-    else if counted && own.calls == 0 && inline && o.copies.isEmpty then some .inlined
+    else if counted && o.neverCalled && silent == some .inlined then some .inlined
+    else if counted && o.neverCalled && silent == some .unused then some .unused
+    else if counted && own.calls == 0 && silent.isNone && inline && o.copies.isEmpty then
+      some .inlined
     else if counted && called.calls > 0 then some (.ratio (own.plus called).ratio)
     else some (.ratio (own.plus copies).ratio)
 
 /-- A module's path as it appears in C names: `A/B` is `A_B`. -/
 def mangledModule (module : String) : String :=
   "_".intercalate ((module.splitOn "/").map LeanLang.mangle)
+
+/-- A C function's name with the wrapping that makes it another function of the same code removed:
+`_init_` for a closed term, `___boxed` for a wrapper. -/
+def unwrapped (name : String) : String :=
+  let name := (stripPrefix? name "_init_").getD name
+  (stripSuffix? name "___boxed").getD name
+
+/-- The declarations a C function is part of: its own, the callee it is a copy of, and the callers
+that copy is for. `decl` finds the declaration of a name without its package prefix. -/
+def declsOf {α} (name : String) (prefixes : Array String) (decl : String → Option α) : Array α :=
+  match prefixes.findSome? (stripPrefix? (unwrapped name) ·) with
+  | none => #[]
+  | some rest => (chain rest).filterMap decl
+
+/-- Whether the line at `i` declares something rather than being part of a function's body. Bodies
+are indented or start with a label, a brace or a local variable. -/
+def declaration (source : ByteArray) (i : Nat) : Bool :=
+  hasAt source i "LEAN_EXPORT".toUTF8 || hasAt source i "static ".toUTF8 ||
+    hasAt source i "extern ".toUTF8
+
+/-- The declarations with a name in `targets` that this C file's code mentions, added to `found`.
+`starts` is the file's functions by first line. Lines that declare a function are skipped, but a
+`static const` line can hold a closure over one, and belongs to the name it declares. A function's
+own parts are not mentions: `owners` says what a name is part of. Module initialisers assign every
+constant, and say nothing of who uses it. -/
+def mentions (source : ByteArray) (starts : Array (Nat × String))
+    (targets : Std.HashMap String (Nat × Nat)) (owners : String → Array (Nat × Nat))
+    (found : Std.HashSet (Nat × Nat)) : Std.HashSet (Nat × Nat) := Id.run do
+  let mut found := found
+  let mut i := 0
+  let mut line := 1
+  let mut next := 0
+  let mut current : Option String := none
+  let isId (b : UInt8) : Bool :=
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
+  while i < source.size do
+    -- At the start of a line.
+    while next < starts.size && starts[next]!.1 < line do next := next + 1
+    let starting := next < starts.size && starts[next]!.1 == line
+    if starting then
+      let name := localName starts[next]!.2
+      current := if name.startsWith "initialize_" then none else some name
+    let closed := hasAt source i "static const ".toUTF8
+    let read := !starting && (closed || !declaration source i)
+    let mut owner := if closed then none else current
+    while i < source.size && source[i]! != 10 do
+      let b := source[i]!
+      if read && b == 108 && !isId source[i - 1]! &&
+          (source[i + 1]! == 95 || (source[i + 1]! == 112 && source[i + 2]! == 95)) then
+        let mut j := i
+        while j < source.size && isId source[j]! do j := j + 1
+        let word := String.fromUTF8! (source.extract i j)
+        i := j
+        match owner, closed with
+        | none, true => owner := some word
+        | none, false => pure ()
+        | some name, _ =>
+          if let some target := targets.get? (unwrapped word) then
+            if !found.contains target && !(owners name).contains target then
+              found := found.insert target
+      else i := i + 1
+    i := i + 1
+    line := line + 1
+  return found
+
+/-- Where each declaration that was never called stands, by file and function. One is left out when
+what would settle it cannot be read. -/
+def silentDeclarations (owned : Array (Array Owned)) (cNames : Std.HashMap String (Nat × Nat))
+    (sources : Array (String × Array (Nat × String) × Array String))
+    (projects : Std.HashMap String (Array String)) (ran : Array String)
+    (everywhere : Std.HashMap String (Nat × Nat)) :
+    IO (Std.HashMap (Nat × Nat) Silent) := do
+  let targets := cNames.filter fun _ (i, index) => owned[i]![index]!.neverCalled
+  if targets.isEmpty then return {}
+  let mut sites : Std.HashSet (Nat × Nat) := {}
+  for (path, starts, prefixes) in sources do
+    let source ← try IO.FS.readBinFile path catch _ => return {}
+    sites := mentions source starts targets (declsOf · prefixes (find everywhere)) sites
+  let mut settled : Std.HashMap (Nat × Nat) Silent := {}
+  for declaration in sites do settled := settled.insert declaration .hasCallSite
+  -- What is left needs the source's references. Each C file came from a module of its project.
+  let mut compiled : Array (String × Array String) := #[]
+  for (root, modules) in projects do
+    let oleans ← modules.filterM fun m =>
+      System.FilePath.pathExists s!"{root}/.lake/build/lib/lean/{m}.olean"
+    if !oleans.isEmpty then
+      compiled := compiled.push (root, oleans.map (s!".lake/build/lib/lean/{·}.olean"))
+  if compiled.isEmpty then return settled
+  let some uses ← LeanRefs.read compiled | return settled
+  let nodes := uses.fold (init := ({} : Std.HashMap String String)) fun acc k _ => acc.insert k k
+  let roots := ran.filterMap (find nodes)
+  let live := LeanRefs.reached uses (roots.push "main")
+  for (key, declaration) in everywhere do
+    let (i, index) := declaration
+    if settled.contains declaration || !owned[i]![index]!.neverCalled then continue
+    if !nodes.contains key then continue
+    settled := settled.insert declaration (if live.contains key then .inlined else .unused)
+  return settled
 
 /-- Coverage for the functions of each Lean file in `files`, given as its path and functions, in
 the same order. A file's entry is `none` when the report has no C file for its module; within it,
@@ -211,12 +338,20 @@ def measures (coverage : Coverage) (files : Array (String × Array Function)) :
     cFiles := cFiles.push cFile
     keys := keys.push mine
   let mut owned : Array (Array Owned) := files.map fun (_, fs) => Array.replicate fs.size {}
+  -- Which declaration each C function belongs to, and what is needed to read each C file later.
+  let mut cNames : Std.HashMap String (Nat × Nat) := {}
+  let mut executed : Array String := #[]
+  let mut sources : Array (String × Array (Nat × String) × Array String) := #[]
+  let mut projects : Std.HashMap String (Array String) := {}
   for path in coverage.fileList do
     let some (_, rest) := splitOnce? path ir | continue
     let some module := stripSuffix? rest ".c" | continue
     let some cFunctions := coverage.functionsOf path | continue
     let here := byC.get? path
     let calls := (coverage.callsOf path).getD {}
+    if let some (root, rest) := splitOnce? path ir then
+      if let some file := stripSuffix? rest ".c" then
+        projects := projects.insert root ((projects.getD root #[]).push file)
     let module := mangledModule module
     let starts := cFunctions.toArray
     let initializer := starts.findSome? fun (_, name) => do
@@ -226,6 +361,7 @@ def measures (coverage : Coverage) (files : Array (String × Array Function)) :
     let prefixes := match initializer with
       | some package => #[s!"lp_{package}_", "l_"]
       | none => #["l_"]
+    sources := sources.push (path, starts, prefixes)
     for h : n in [0:starts.size] do
       let (start, raw) := starts[n]
       let stop := match starts[n + 1]? with
@@ -235,6 +371,7 @@ def measures (coverage : Coverage) (files : Array (String × Array Function)) :
       let parts := chain name
       let (lines, ran) := coverage.hits path start stop
       let called := calls.getD raw 0
+      if called > 0 then executed := executed ++ chain name
       -- A specialised copy belongs to its innermost callee that is a declaration: one of this
       -- module's first, else any module's.
       let callee := (parts.extract 0 (parts.size - 1)).zipIdx.findSome? fun (part, k) =>
@@ -242,17 +379,20 @@ def measures (coverage : Coverage) (files : Array (String × Array Function)) :
           find everywhere part).map (·, k)
       if let some ((i, index), k) := callee then
         let copy := copyOf parts k
+        cNames := cNames.insert (localName raw) (i, index)
         owned := owned.modify i (·.modify index fun o =>
           { o with copies := o.copies.insert copy ((o.copies.getD copy {}).add lines ran called) })
       else
         let some i := here | continue
         let some index := find keys[i]! parts.back! | continue
+        cNames := cNames.insert (localName raw) (i, index)
         owned := owned.modify i (·.modify index fun o =>
           { o with own := some ((o.own.getD {}).add lines ran called) })
-  return (files.zip (cFiles.zip owned)).map fun ((_, functions), (cFile, mine)) => do
+  let silent ← silentDeclarations owned cNames sources projects executed everywhere
+  return (files.zipIdx.zip (cFiles.zip owned)).map fun (((_, functions), i), (cFile, mine)) => do
     let cFile ← cFile
     let counted := (coverage.callsOf cFile).isSome
-    return (functions.zip mine).map fun (f, o) =>
-      o.measure counted ((f.symbol.map (·.inline)).getD false)
+    return (functions.zipIdx.zip mine).map fun ((f, index), o) =>
+      o.measure counted ((f.symbol.map (·.inline)).getD false) (silent.get? (i, index))
 
 end Clocrap.LeanCov

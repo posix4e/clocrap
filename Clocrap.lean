@@ -18,6 +18,7 @@ import Clocrap.Diff
 import Clocrap.Walk
 import Clocrap.Lcov
 import Clocrap.LeanCov
+import Clocrap.LeanRefs
 import Clocrap.Crap
 import Clocrap.Json
 import Clocrap.Report

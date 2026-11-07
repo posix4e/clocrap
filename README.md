@@ -238,11 +238,28 @@ report says how many were left out for that.
 
 The report's call counts (`FNDA:`) settle two more cases. A generic
 declaration whose own body was never called is measured by its specialised
-copies that were. A declaration Lean may inline into its callers
-(`@[inline]`, `@[macro_inline]`, `@[always_inline]`, `@[specialize]`, an
-`abbrev`, or a body that is one application of names) whose own C was never
-called ran, if at all, inside its callers' C: it is counted apart as inlined,
-with no coverage, rather than as untested.
+copies that were. A declaration none of whose C was ever called may still have
+run, inside a caller the compiler inlined it into, so clocrap reads the C on disk
+for the places that use it:
+
+| The C | The source | Reported as |
+|---|---|---|
+| Other C uses it | | Never run: the call site is there and its count is 0 |
+| Nothing else uses it | Something that ran reaches it | `inlined`: no coverage, left out of the table |
+| Nothing else uses it | Nothing that ran reaches it | `UNUSED`: 0%, scored and marked |
+
+A use is a direct call, a closure in a function or in a `static const`, a
+`___boxed` wrapper or a closed term in `_init_…`, in any module. A declaration's
+own parts, and copies of something else specialised for it, do not count.
+
+The source column comes from the `.olean` files next to the C, read by
+`scripts/lean-refs.lean` with the project's own `lean`, as an `.ilean` file does
+not record an instance or coercion that nothing names. An `UNUSED` function is
+dead code, or runs only at compile time, such as in a macro. JSON marks it
+`"unused": true`. Without the C or the `.olean` files, a declaration Lean may
+inline (`@[inline]`, `@[macro_inline]`, `@[always_inline]`, `@[specialize]`, an
+`abbrev`, or a body that is one application of names) is taken to be inlined, and
+any other stays never run.
 
 Lean's toolchain ships clang without LLVM's profile runtime, so the build uses
 Apple's, through `scripts/lean-cov-cc`:

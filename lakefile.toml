@@ -8,9 +8,15 @@ name = "swift-reader"
 path = "Clocrap/SwiftReader.swift"
 text = true
 
+# The same, for `Clocrap/LeanRefs.lean`.
+[[input_file]]
+name = "lean-refs"
+path = "scripts/lean-refs.lean"
+text = true
+
 [[lean_lib]]
 name = "Clocrap"
-needs = ["swift-reader"]
+needs = ["swift-reader", "lean-refs"]
 
 [[lean_exe]]
 name = "clocrap"
